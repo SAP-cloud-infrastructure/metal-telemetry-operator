@@ -6,7 +6,8 @@ ARG TARGETARCH
 WORKDIR /workspace
 COPY go.mod go.mod
 COPY go.sum go.sum
-RUN go mod download
+RUN --mount=type=cache,target=/go/pkg \
+    go mod download || (sleep 5 && go mod download) || (sleep 10 && go mod download)
 
 COPY cmd/main.go cmd/main.go
 COPY api/ api/
