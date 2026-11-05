@@ -1,0 +1,9 @@
+apiVersion: telemetry.metal.ironcore.dev/v1alpha1
+kind: BMCTelemetry
+metadata:
+  labels:
+    app.kubernetes.io/name: metal-telemetry-operator
+    app.kubernetes.io/managed-by: kustomize
+  name: bmctelemetry-sample
+spec:
+  # TODO(user): Add fields here

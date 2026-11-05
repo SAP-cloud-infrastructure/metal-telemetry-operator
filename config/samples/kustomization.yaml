@@ -1,0 +1,4 @@
+## Append samples of your project ##
+resources:
+- telemetry_v1alpha1_bmctelemetry.yaml
+# +kubebuilder:scaffold:manifestskustomizesamples

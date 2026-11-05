@@ -1,0 +1,33 @@
+{{- if .Values.rbac.helpers.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+{{- if .Values.rbac.namespaced }}
+kind: Role
+{{- else }}
+kind: ClusterRole
+{{- end }}
+metadata:
+{{- if .Values.rbac.namespaced }}
+  namespace: {{ .Release.Namespace }}
+{{- end }}
+  labels:
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    app.kubernetes.io/name: {{ include "metal-telemetry-operator.name" . }}
+    helm.sh/chart: {{ .Chart.Name }}-{{ .Chart.Version | replace "+" "_" }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  name: {{ include "metal-telemetry-operator.resourceName" (dict "suffix" "bmctelemetry-viewer-role" "context" $) }}
+rules:
+- apiGroups:
+  - telemetry.metal.ironcore.dev
+  resources:
+  - bmctelemetries
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - telemetry.metal.ironcore.dev
+  resources:
+  - bmctelemetries/status
+  verbs:
+  - get
+{{- end }}
