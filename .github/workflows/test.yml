@@ -23,6 +23,9 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Run vulnerability check
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
       - name: Running Tests
         run: |
           go mod tidy
