@@ -40,6 +40,7 @@ func init() {
 func main() {
 	var metricsAddr string
 	var enableLeaderElection bool
+	var leaderElectionNamespace string
 	var probeAddr string
 	var maxConcurrentConnects int
 	tlsOpts := make([]func(*tls.Config), 0, 1)
@@ -48,6 +49,8 @@ func main() {
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", true,
 		"Enable leader election for controller manager.")
+	flag.StringVar(&leaderElectionNamespace, "leader-election-namespace", "",
+		"Namespace used for leader election. Defaults to the pod namespace when running in-cluster.")
 	flag.IntVar(&maxConcurrentConnects, "max-concurrent-connects", 50,
 		"Maximum number of simultaneous in-flight SSE connect attempts.")
 
@@ -72,8 +75,9 @@ func main() {
 			TLSOpts:     tlsOpts,
 		},
 		HealthProbeBindAddress: probeAddr,
-		LeaderElection:         enableLeaderElection,
-		LeaderElectionID:       "metal-telemetry-operator.metal.ironcore.dev",
+		LeaderElection:          enableLeaderElection,
+		LeaderElectionID:        "metal-telemetry-operator.metal.ironcore.dev",
+		LeaderElectionNamespace: leaderElectionNamespace,
 	})
 	if err != nil {
 		setupLog.Error(err, "Failed to start manager")
