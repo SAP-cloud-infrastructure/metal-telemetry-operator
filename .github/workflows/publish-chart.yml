@@ -86,10 +86,13 @@ jobs:
         run: |
           curl -fsSL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/local/bin/yq && chmod a+x /usr/local/bin/yq
 
+      - name: Set lowercase owner
+        run: echo "OWNER_LC=$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')" >> $GITHUB_ENV
+
       - name: Set container image repository and tag
         run: |
           IMAGE_TAG=sha-$(echo ${{ github.sha }} | cut -c1-7)
-          yq -i '.manager.image.repository = "ghcr.io/${{ github.repository_owner }}/metal-telemetry-operator"' dist/chart/values.yaml
+          yq -i '.manager.image.repository = "ghcr.io/${{ env.OWNER_LC }}/metal-telemetry-operator"' dist/chart/values.yaml
           yq -i '.manager.image.tag = "'$IMAGE_TAG'"' dist/chart/values.yaml
 
       - name: Package Helm chart with crds folder in template
@@ -112,5 +115,5 @@ jobs:
 
       - name: Push Helm chart to GHCR
         run: |
-          helm push metal-telemetry-operator-${{ steps.chart_version.outputs.version }}.tgz oci://ghcr.io/${{ github.repository_owner }}/charts
-          helm push metal-telemetry-operator-${{ steps.chart_version.outputs.version }}-crds.tgz oci://ghcr.io/${{ github.repository_owner }}/charts
+          helm push metal-telemetry-operator-${{ steps.chart_version.outputs.version }}.tgz oci://ghcr.io/${{ env.OWNER_LC }}/charts
+          helm push metal-telemetry-operator-${{ steps.chart_version.outputs.version }}-crds.tgz oci://ghcr.io/${{ env.OWNER_LC }}/charts
