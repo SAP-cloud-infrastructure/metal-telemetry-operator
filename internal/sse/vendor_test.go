@@ -50,10 +50,9 @@ func TestProbeEventService_noSSEURI(t *testing.T) {
 	}
 }
 
-func TestProbeEventService_withSSEFilterProperties(t *testing.T) {
-	// Covers Dell iDRAC9 v1_7_2+ (and any other firmware that advertises
-	// SSEFilterPropertiesSupported). Quoted is the OData-standard form and is
-	// the only syntax accepted by older Dell iDRAC9 firmware (e.g. v1_7_2).
+func TestProbeEventService_vendorSpecificPathWithFilter(t *testing.T) {
+	// Older Dell iDRAC9 firmware (v1_7_2/v1_8_0): uses a vendor-specific SSE path
+	// (/redfish/v1/EventService/ServerSentEvent) and requires quoted OData filter syntax.
 	host, shutdown := serveFixture(t, eventServiceFixture{
 		ODataType:          "#EventService.v1_8_0.EventService",
 		ServerSentEventURI: testSSEURI,
@@ -75,6 +74,30 @@ func TestProbeEventService_withSSEFilterProperties(t *testing.T) {
 	}
 	if !strings.Contains(cfg.SSEURL(), "%27MetricReport%27") {
 		t.Errorf("SSEURL should use quoted filter: %v", cfg.SSEURL())
+	}
+}
+
+func TestProbeEventService_standardSSEPath(t *testing.T) {
+	// Newer Dell iDRAC9 firmware (v1_10_2+) and HPE iLO: use the standardised
+	// /redfish/v1/SSE path and require unquoted OData filter syntax.
+	host, shutdown := serveFixture(t, eventServiceFixture{
+		ODataType:          "#EventService.v1_10_2.EventService",
+		ServerSentEventURI: "/redfish/v1/SSE",
+		SSEFilterPropertiesSupported: &struct {
+			EventFormatType bool `json:"EventFormatType"`
+		}{EventFormatType: true},
+	})
+	defer shutdown()
+
+	cfg, err := sse.ProbeEventService(context.Background(), host, "admin", "pass")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.FilterSyntax != sse.FilterSyntaxUnquoted {
+		t.Errorf("expected Unquoted for /redfish/v1/SSE path, got %v", cfg.FilterSyntax)
+	}
+	if strings.Contains(cfg.SSEURL(), "%27") {
+		t.Errorf("SSEURL should not use quoted filter: %v", cfg.SSEURL())
 	}
 }
 

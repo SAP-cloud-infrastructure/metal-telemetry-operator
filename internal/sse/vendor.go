@@ -111,19 +111,7 @@ func detectVendor(es eventServiceResponse) VendorConfig {
 		return VendorConfig{Mode: ModeUnsupported}
 	}
 
-	// Case 2: SSEFilterPropertiesSupported present → firmware declares OData filter support.
-	// Older Dell iDRAC9 (e.g. v1_7_2) requires the quoted form ('MetricReport');
-	// newer Dell iDRAC9 (v1_8_0+) accepts both. Quoted is the OData standard and
-	// works on every firmware that advertises this field.
-	if es.SSEFilterPropertiesSupported != nil {
-		return VendorConfig{
-			Mode:         ModeSSE,
-			SSEURI:       es.ServerSentEventURI,
-			FilterSyntax: FilterSyntaxQuoted,
-		}
-	}
-
-	// Case 3: @odata.type contains v1_11_0 → Dell iDRAC10 (quoted filter)
+	// Case 2: @odata.type contains v1_11_0 → Dell iDRAC10 (quoted filter)
 	if strings.Contains(es.ODataType, "v1_11_0") {
 		return VendorConfig{
 			Mode:         ModeSSE,
@@ -132,7 +120,28 @@ func detectVendor(es eventServiceResponse) VendorConfig {
 		}
 	}
 
-	// Case 4: SSE URI present, none of above → Dell iDRAC9 or unknown (unquoted)
+	// Case 3: standardised /redfish/v1/SSE path → newer Dell iDRAC9 firmware and HPE iLO.
+	// These require unquoted OData filter syntax.
+	if strings.HasSuffix(es.ServerSentEventURI, "/SSE") {
+		return VendorConfig{
+			Mode:         ModeSSE,
+			SSEURI:       es.ServerSentEventURI,
+			FilterSyntax: FilterSyntaxUnquoted,
+		}
+	}
+
+	// Case 4: vendor-specific SSE path + SSEFilterPropertiesSupported → older Dell iDRAC9
+	// (e.g. /redfish/v1/EventService/ServerSentEvent on v1_7_2/v1_8_0 firmware).
+	// These require the quoted OData filter form.
+	if es.SSEFilterPropertiesSupported != nil {
+		return VendorConfig{
+			Mode:         ModeSSE,
+			SSEURI:       es.ServerSentEventURI,
+			FilterSyntax: FilterSyntaxQuoted,
+		}
+	}
+
+	// Case 5: SSE URI present, none of the above → oldest firmware (unquoted)
 	return VendorConfig{
 		Mode:         ModeSSE,
 		SSEURI:       es.ServerSentEventURI,
