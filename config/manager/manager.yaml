@@ -65,6 +65,9 @@ spec:
           - --health-probe-bind-address=:8081
         image: controller:latest
         name: manager
+        env:
+        - name: KUBERNETES_CLUSTER_DOMAIN
+          value: cluster.local
         ports:
         - containerPort: 8081
           name: health

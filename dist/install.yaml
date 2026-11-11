@@ -296,6 +296,22 @@ metadata:
   name: metal-telemetry-operator-manager-role
 rules:
 - apiGroups:
+  - metal.ironcore.dev
+  resources:
+  - bmcs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - metal.ironcore.dev
+  resources:
+  - bmcsecrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - telemetry.metal.ironcore.dev
   resources:
   - bmctelemetries
@@ -445,6 +461,9 @@ spec:
         - --health-probe-bind-address=:8081
         command:
         - /manager
+        env:
+        - name: KUBERNETES_CLUSTER_DOMAIN
+          value: cluster.local
         image: controller:latest
         livenessProbe:
           httpGet:

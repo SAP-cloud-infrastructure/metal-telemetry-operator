@@ -27,6 +27,10 @@ manager:
   args:
     - --leader-elect
 
+  ## Environment variables for the manager container
+  ##
+  env: []
+
   ## Health probes.
   ## The manager serves the liveness (/healthz) and readiness (/readyz) endpoints on this port.
   ##
@@ -198,4 +202,9 @@ prometheus:
 ##
 networkPolicy:
   enabled: false
+
+## Extra Kubernetes objects to deploy alongside the chart.
+## Each entry is rendered as a full YAML manifest; supports Helm templating.
+##
+extraObjects: []
 

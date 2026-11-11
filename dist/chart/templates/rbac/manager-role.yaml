@@ -11,6 +11,22 @@ metadata:
   name: {{ include "metal-telemetry-operator.resourceName" (dict "suffix" "manager-role" "context" $) }}
 rules:
 - apiGroups:
+  - metal.ironcore.dev
+  resources:
+  - bmcs
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - metal.ironcore.dev
+  resources:
+  - bmcsecrets
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
   - telemetry.metal.ironcore.dev
   resources:
   - bmctelemetries
