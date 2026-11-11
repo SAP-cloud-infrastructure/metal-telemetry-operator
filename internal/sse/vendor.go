@@ -111,12 +111,15 @@ func detectVendor(es eventServiceResponse) VendorConfig {
 		return VendorConfig{Mode: ModeUnsupported}
 	}
 
-	// Case 2: SSEFilterPropertiesSupported present → Lenovo XCC3
+	// Case 2: SSEFilterPropertiesSupported present → firmware declares OData filter support.
+	// Older Dell iDRAC9 (e.g. v1_7_2) requires the quoted form ('MetricReport');
+	// newer Dell iDRAC9 (v1_8_0+) accepts both. Quoted is the OData standard and
+	// works on every firmware that advertises this field.
 	if es.SSEFilterPropertiesSupported != nil {
 		return VendorConfig{
 			Mode:         ModeSSE,
 			SSEURI:       es.ServerSentEventURI,
-			FilterSyntax: FilterSyntaxUnquoted,
+			FilterSyntax: FilterSyntaxQuoted,
 		}
 	}
 

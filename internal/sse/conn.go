@@ -128,6 +128,7 @@ func (c *sseConn) stream(ctx context.Context) error {
 
 	// SSE parsing: accumulate data: lines between blank lines.
 	scanner := bufio.NewScanner(resp.Body)
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024) // HPE iLO sends MetricReports > 64 KB
 	var dataBuf strings.Builder
 	var lastEvent time.Time
 

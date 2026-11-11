@@ -50,7 +50,10 @@ func TestProbeEventService_noSSEURI(t *testing.T) {
 	}
 }
 
-func TestProbeEventService_lenovo(t *testing.T) {
+func TestProbeEventService_withSSEFilterProperties(t *testing.T) {
+	// Covers Dell iDRAC9 v1_7_2+ (and any other firmware that advertises
+	// SSEFilterPropertiesSupported). Quoted is the OData-standard form and is
+	// the only syntax accepted by older Dell iDRAC9 firmware (e.g. v1_7_2).
 	host, shutdown := serveFixture(t, eventServiceFixture{
 		ODataType:          "#EventService.v1_8_0.EventService",
 		ServerSentEventURI: testSSEURI,
@@ -67,11 +70,11 @@ func TestProbeEventService_lenovo(t *testing.T) {
 	if cfg.Mode != sse.ModeSSE {
 		t.Errorf("expected SSE, got %v", cfg.Mode)
 	}
-	if cfg.FilterSyntax != sse.FilterSyntaxUnquoted {
-		t.Errorf("expected Unquoted, got %v", cfg.FilterSyntax)
+	if cfg.FilterSyntax != sse.FilterSyntaxQuoted {
+		t.Errorf("expected Quoted, got %v", cfg.FilterSyntax)
 	}
-	if !strings.Contains(cfg.SSEURL(), "MetricReport") {
-		t.Errorf("SSEURL missing MetricReport filter: %v", cfg.SSEURL())
+	if !strings.Contains(cfg.SSEURL(), "%27MetricReport%27") {
+		t.Errorf("SSEURL should use quoted filter: %v", cfg.SSEURL())
 	}
 }
 
