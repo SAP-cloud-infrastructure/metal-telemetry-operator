@@ -43,6 +43,7 @@ func main() {
 	var leaderElectionNamespace string
 	var probeAddr string
 	var maxConcurrentConnects int
+	var metricsSecure bool
 	tlsOpts := make([]func(*tls.Config), 0, 1)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metrics endpoint binds to.")
@@ -53,6 +54,8 @@ func main() {
 		"Namespace used for leader election. Defaults to the pod namespace when running in-cluster.")
 	flag.IntVar(&maxConcurrentConnects, "max-concurrent-connects", 50,
 		"Maximum number of simultaneous in-flight SSE connect attempts.")
+	flag.BoolVar(&metricsSecure, "metrics-secure", true,
+		"If set, the metrics endpoint is served securely via HTTPS.")
 
 	// Disable HTTP/2 to avoid stream cancellation CVEs.
 	disableHTTP2 := func(c *tls.Config) {
@@ -71,8 +74,9 @@ func main() {
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
 		Metrics: metricsserver.Options{
-			BindAddress: metricsAddr,
-			TLSOpts:     tlsOpts,
+			BindAddress:   metricsAddr,
+			SecureServing: metricsSecure,
+			TLSOpts:       tlsOpts,
 		},
 		HealthProbeBindAddress: probeAddr,
 		LeaderElection:          enableLeaderElection,
