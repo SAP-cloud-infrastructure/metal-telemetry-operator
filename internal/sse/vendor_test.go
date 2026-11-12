@@ -17,6 +17,7 @@ import (
 type eventServiceFixture struct {
 	ODataType                    string `json:"@odata.type"`
 	ServerSentEventURI           string `json:"ServerSentEventUri,omitempty"`
+	ServiceEnabled               bool   `json:"ServiceEnabled,omitempty"`
 	SSEFilterPropertiesSupported *struct {
 		EventFormatType bool `json:"EventFormatType"`
 	} `json:"SSEFilterPropertiesSupported,omitempty"`
@@ -35,7 +36,32 @@ func serveFixture(t *testing.T, fix eventServiceFixture) (host string, shutdown 
 	return host, srv.Close
 }
 
-func TestProbeEventService_noSSEURI(t *testing.T) {
+func TestProbeEventService_hpeILO_MetricReport(t *testing.T) {
+	// HPE iLO: EventService.ServiceEnabled=true but no ServerSentEventUri.
+	// Expected: ModeMetricReport (push subscriptions available, no SSE).
+	host, shutdown := serveFixture(t, eventServiceFixture{
+		ODataType:      "#EventService.v1_10_0.EventService",
+		ServiceEnabled: true,
+	})
+	defer shutdown()
+
+	cfg, err := sse.ProbeEventService(context.Background(), host, "admin", "pass")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Mode != sse.ModeMetricReport {
+		t.Errorf("expected MetricReport, got %v", cfg.Mode)
+	}
+	if !cfg.ServiceEnabled {
+		t.Errorf("expected ServiceEnabled=true")
+	}
+	if cfg.SSEURL() != "" {
+		t.Errorf("expected empty SSEURL for MetricReport mode, got %q", cfg.SSEURL())
+	}
+}
+
+func TestProbeEventService_noSSEURI_serviceDisabled(t *testing.T) {
+	// No SSE URI and ServiceEnabled=false → Unsupported (not MetricReport).
 	host, shutdown := serveFixture(t, eventServiceFixture{
 		ODataType: "#EventService.v1_10_0.EventService",
 	})

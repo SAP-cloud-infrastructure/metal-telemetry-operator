@@ -21,6 +21,7 @@ import (
 	metalv1alpha1 "github.com/ironcore-dev/metal-operator/api/v1alpha1"
 
 	telemetryv1alpha1 "github.com/SAP-cloud-infrastructure/metal-telemetry-operator/api/v1alpha1"
+	"github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/push"
 	"github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/sink"
 	prometheusSink "github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/sink/prometheus"
 	"github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/sse"
@@ -35,6 +36,12 @@ type BMCReconciler struct {
 	client.Client
 	Scheme                *runtime.Scheme
 	MaxConcurrentConnects int
+	// ConfigLoader provides live-reloaded push pipeline configuration (exclusion
+	// rules and mode overrides). Optional; when nil the push config path is skipped.
+	ConfigLoader *push.ConfigLoader
+	// EnqueuePushBMC fast-paths the push subscription reconciler when mode changes
+	// to or from MetricReport. Optional; when nil the informer triggers reconcile.
+	EnqueuePushBMC func(name string)
 
 	initOnce sync.Once
 	connMgr  *sse.ConnectionManager
@@ -99,7 +106,25 @@ func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return ctrl.Result{}, err
 	}
 
-	// Fetch BMC credentials.
+	// Steps 1–3: in-memory mode resolution (no BMC probe needed).
+	cfg := r.pushConfig()
+	earlyMode := r.resolveEarlyMode(bmc, tel, cfg)
+
+	// Short-circuit for modes that don't require an SSE connection.
+	if earlyMode == telemetryv1alpha1.TelemetryModeExcluded ||
+		earlyMode == telemetryv1alpha1.TelemetryModeMetricReport ||
+		earlyMode == telemetryv1alpha1.TelemetryModeUnsupported {
+		r.connMgr.Stop(bmc.Name)
+		if err := r.updateTelemetryStatus(ctx, tel, earlyMode, sse.VendorConfig{}, ""); err != nil {
+			return ctrl.Result{}, err
+		}
+		if earlyMode != telemetryv1alpha1.TelemetryModeUnsupported && r.EnqueuePushBMC != nil {
+			r.EnqueuePushBMC(bmc.Name)
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Step 4: probe the EventService (required to discover SSE URI and detect MetricReport mode).
 	username, password, err := r.fetchCredentials(ctx, bmc)
 	if err != nil {
 		log.Error(err, "Failed to fetch BMC credentials")
@@ -126,26 +151,78 @@ func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		log.Error(err, "Failed to update SchemaDetected condition")
 	}
 
-	if vendorCfg.Mode == sse.ModeUnsupported {
+	// Apply step 4 only when steps 1–3 produced no match.
+	mode := earlyMode
+	if mode == "" {
+		mode = probeModeToTelemetryMode(vendorCfg.Mode)
+	}
+
+	if mode == telemetryv1alpha1.TelemetryModeUnsupported ||
+		mode == telemetryv1alpha1.TelemetryModeExcluded ||
+		mode == telemetryv1alpha1.TelemetryModeMetricReport {
 		r.connMgr.Stop(bmc.Name)
-		return ctrl.Result{}, r.updateTelemetryStatus(ctx, tel, telemetryv1alpha1.TelemetryModeUnsupported, vendorCfg, "")
+		if err := r.updateTelemetryStatus(ctx, tel, mode, vendorCfg, ""); err != nil {
+			return ctrl.Result{}, err
+		}
+		if mode != telemetryv1alpha1.TelemetryModeUnsupported && r.EnqueuePushBMC != nil {
+			r.EnqueuePushBMC(bmc.Name)
+		}
+		return ctrl.Result{}, nil
 	}
 
 	// Start or update the SSE connection.
-	cfg := sse.ConnConfig{
+	connCfg := sse.ConnConfig{
 		BMCName:  bmc.Name,
 		Host:     host,
 		Username: username,
 		Password: password,
 		Vendor:   vendorCfg,
 	}
-	if err := r.connMgr.Ensure(ctx, cfg); err != nil {
+	if err := r.connMgr.Ensure(ctx, connCfg); err != nil {
 		log.Error(err, "Failed to ensure SSE connection")
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
 	return ctrl.Result{}, r.updateTelemetryStatus(ctx, tel,
 		telemetryv1alpha1.TelemetryModeSSE, vendorCfg, tel.Status.ConnectionState)
+}
+
+// pushConfig returns the current push pipeline config, or nil when no ConfigLoader is set.
+func (r *BMCReconciler) pushConfig() *push.Config {
+	if r.ConfigLoader == nil {
+		return nil
+	}
+	return r.ConfigLoader.Config()
+}
+
+// resolveEarlyMode applies steps 1–3 of the mode priority chain without probing the BMC.
+// Returns "" when steps 1–3 produce no match (step 4 / probe is needed).
+func (r *BMCReconciler) resolveEarlyMode(bmc *metalv1alpha1.BMC, tel *telemetryv1alpha1.BMCTelemetry, cfg *push.Config) telemetryv1alpha1.TelemetryMode {
+	// Step 1: exclusion annotation or ConfigMap exclude rule.
+	if push.IsExcluded(bmc, cfg) {
+		return telemetryv1alpha1.TelemetryModeExcluded
+	}
+	// Step 2: spec.ModeOverride on the BMCTelemetry resource.
+	if tel.Spec.ModeOverride != nil {
+		return *tel.Spec.ModeOverride
+	}
+	// Step 3: ConfigMap modeOverrides rule.
+	if rule := push.ModeOverrideFor(bmc, cfg); rule != nil {
+		return rule.Mode
+	}
+	return ""
+}
+
+// probeModeToTelemetryMode converts a probe-derived sse.Mode to the corresponding TelemetryMode.
+func probeModeToTelemetryMode(m sse.Mode) telemetryv1alpha1.TelemetryMode {
+	switch m {
+	case sse.ModeSSE:
+		return telemetryv1alpha1.TelemetryModeSSE
+	case sse.ModeMetricReport:
+		return telemetryv1alpha1.TelemetryModeMetricReport
+	default:
+		return telemetryv1alpha1.TelemetryModeUnsupported
+	}
 }
 
 // ensureTelemetry returns the existing BMCTelemetry for this BMC or creates a new one.

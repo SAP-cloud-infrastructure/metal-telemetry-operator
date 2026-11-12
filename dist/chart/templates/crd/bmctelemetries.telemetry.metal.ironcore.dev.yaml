@@ -55,9 +55,19 @@ spec:
           metadata:
             type: object
           spec:
-            description: |-
-              BMCTelemetrySpec defines the desired state of BMCTelemetry.
-              Currently empty — all configuration is derived from the associated BMC resource.
+            description: BMCTelemetrySpec defines the desired state of BMCTelemetry.
+            properties:
+              modeOverride:
+                description: |-
+                  modeOverride forces the telemetry mode for this BMC, bypassing auto-detection
+                  and ConfigMap rules. When unset, the mode is resolved from the ConfigMap rules
+                  and the EventService probe.
+                enum:
+                - SSE
+                - MetricReport
+                - Unsupported
+                - Excluded
+                type: string
             type: object
           status:
             description: BMCTelemetryStatus defines the observed state of BMCTelemetry.
@@ -146,7 +156,9 @@ spec:
                 description: mode describes how telemetry is collected from this BMC.
                 enum:
                 - SSE
+                - MetricReport
                 - Unsupported
+                - Excluded
                 type: string
               reconnectCount:
                 description: reconnectCount is the number of times the SSE connection

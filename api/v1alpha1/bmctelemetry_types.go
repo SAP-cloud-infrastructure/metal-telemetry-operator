@@ -9,14 +9,18 @@ import (
 )
 
 // TelemetryMode describes how telemetry is collected from this BMC.
-// +kubebuilder:validation:Enum=SSE;Unsupported
+// +kubebuilder:validation:Enum=SSE;MetricReport;Unsupported;Excluded
 type TelemetryMode string
 
 const (
 	// TelemetryModeSSE indicates the BMC supports Redfish SSE MetricReport streaming.
 	TelemetryModeSSE TelemetryMode = "SSE"
-	// TelemetryModeUnsupported indicates the BMC has no ServerSentEventUri.
+	// TelemetryModeMetricReport indicates the BMC supports push-based Redfish MetricReport subscriptions.
+	TelemetryModeMetricReport TelemetryMode = "MetricReport"
+	// TelemetryModeUnsupported indicates the BMC has no ServerSentEventUri and no EventService support.
 	TelemetryModeUnsupported TelemetryMode = "Unsupported"
+	// TelemetryModeExcluded indicates telemetry collection has been explicitly disabled for this BMC.
+	TelemetryModeExcluded TelemetryMode = "Excluded"
 )
 
 // FilterSyntax describes the SSE filter syntax variant required by this BMC.
@@ -51,8 +55,14 @@ const (
 )
 
 // BMCTelemetrySpec defines the desired state of BMCTelemetry.
-// Currently empty — all configuration is derived from the associated BMC resource.
-type BMCTelemetrySpec struct{}
+type BMCTelemetrySpec struct {
+	// modeOverride forces the telemetry mode for this BMC, bypassing auto-detection
+	// and ConfigMap rules. When unset, the mode is resolved from the ConfigMap rules
+	// and the EventService probe.
+	// +optional
+	// +kubebuilder:validation:Enum=SSE;MetricReport;Unsupported;Excluded
+	ModeOverride *TelemetryMode `json:"modeOverride,omitempty"`
+}
 
 // BMCTelemetryStatus defines the observed state of BMCTelemetry.
 type BMCTelemetryStatus struct {

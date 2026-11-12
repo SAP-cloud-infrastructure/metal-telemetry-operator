@@ -26,6 +26,11 @@ manager:
   ##
   args:
     - --leader-elect
+    - --push-events-addr={{ .Values.push.eventsAddr }}
+    - --push-receiver-url={{ .Values.push.receiverURL }}
+    - --push-subscriber-id={{ .Values.push.subscriberID }}
+    - --push-config-name={{ .Values.push.configName }}
+    - --push-config-namespace={{ .Values.push.configNamespace }}
 
   ## Environment variables for the manager container
   ##
@@ -83,11 +88,11 @@ manager:
 
   ## Deployment strategy
   ##
-  # strategy:
-  #   type: RollingUpdate
-  #   rollingUpdate:
-  #     maxSurge: 25%
-  #     maxUnavailable: 25%
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
 
   ## Priority class name
   ##
@@ -207,4 +212,31 @@ networkPolicy:
 ## Each entry is rendered as a full YAML manifest; supports Helm templating.
 ##
 extraObjects: []
+
+## Push MetricReport pipeline configuration.
+## Enables the push receiver and subscription reconciler for HPE iLO MetricReport support.
+## Push is activated when receiverURL is non-empty.
+##
+push:
+  ## Base URL that BMCs POST MetricReports to (e.g. "http://10.0.0.5:9093").
+  ## When set, enables the push receiver and subscription reconciler.
+  ##
+  receiverURL: ""
+
+  ## HTTP listen address for the push receiver.
+  ##
+  eventsAddr: ":9093"
+
+  ## Subscriber ID used to scope EventDestination paths.
+  ## Should be unique per operator deployment.
+  ##
+  subscriberID: ""
+
+  ## Name of the ConfigMap holding push mode overrides and exclusion rules.
+  ##
+  configName: ""
+
+  ## Namespace of the push config ConfigMap.
+  ##
+  configNamespace: ""
 

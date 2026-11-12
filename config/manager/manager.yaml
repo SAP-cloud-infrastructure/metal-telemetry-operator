@@ -72,6 +72,9 @@ spec:
         - containerPort: 8081
           name: health
           protocol: TCP
+        - containerPort: 9093
+          name: push-receiver
+          protocol: TCP
         securityContext:
           readOnlyRootFilesystem: true
           allowPrivilegeEscalation: false

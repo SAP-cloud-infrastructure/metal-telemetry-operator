@@ -107,6 +107,12 @@ spec:
         {{- with .Values.manager.image.pullPolicy }}
         imagePullPolicy: {{ . }}
         {{- end }}
+        lifecycle:
+          preStop:
+            exec:
+              command:
+              - sleep
+              - "5"
         livenessProbe:
           httpGet:
             path: /healthz
@@ -117,6 +123,9 @@ spec:
         ports:
         - containerPort: {{ .Values.manager.healthProbe.port }}
           name: health
+          protocol: TCP
+        - containerPort: 9093
+          name: push-receiver
           protocol: TCP
         readinessProbe:
           httpGet:

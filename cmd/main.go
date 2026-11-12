@@ -22,6 +22,7 @@ import (
 
 	telemetryv1alpha1 "github.com/SAP-cloud-infrastructure/metal-telemetry-operator/api/v1alpha1"
 	"github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/controller"
+	"github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/push"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -44,6 +45,11 @@ func main() {
 	var probeAddr string
 	var maxConcurrentConnects int
 	var metricsSecure bool
+	var pushReceiverURL string
+	var pushEventsAddr string
+	var pushSubscriberID string
+	var pushConfigName string
+	var pushConfigNamespace string
 	tlsOpts := make([]func(*tls.Config), 0, 1)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metrics endpoint binds to.")
@@ -56,6 +62,16 @@ func main() {
 		"Maximum number of simultaneous in-flight SSE connect attempts.")
 	flag.BoolVar(&metricsSecure, "metrics-secure", true,
 		"If set, the metrics endpoint is served securely via HTTPS.")
+	flag.StringVar(&pushReceiverURL, "push-receiver-url", "",
+		"Base URL that BMCs POST MetricReports to (e.g. http://10.0.0.5:9093). Required for push mode.")
+	flag.StringVar(&pushEventsAddr, "push-events-addr", ":9093",
+		"HTTP listen address for the push MetricReport receiver.")
+	flag.StringVar(&pushSubscriberID, "push-subscriber-id", "",
+		"Subscriber ID used to scope EventDestination paths. Should be unique per deployment.")
+	flag.StringVar(&pushConfigName, "push-config-name", "",
+		"Name of the ConfigMap holding push mode overrides and exclusion rules.")
+	flag.StringVar(&pushConfigNamespace, "push-config-namespace", "",
+		"Namespace of the push config ConfigMap.")
 
 	// Disable HTTP/2 to avoid stream cancellation CVEs.
 	disableHTTP2 := func(c *tls.Config) {
@@ -78,7 +94,7 @@ func main() {
 			SecureServing: metricsSecure,
 			TLSOpts:       tlsOpts,
 		},
-		HealthProbeBindAddress: probeAddr,
+		HealthProbeBindAddress:  probeAddr,
 		LeaderElection:          enableLeaderElection,
 		LeaderElectionID:        "metal-telemetry-operator.metal.ironcore.dev",
 		LeaderElectionNamespace: leaderElectionNamespace,
@@ -88,13 +104,43 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Build the push config loader when config coordinates are provided.
+	var pushLoader *push.ConfigLoader
+	if pushConfigName != "" && pushConfigNamespace != "" {
+		pushLoader = &push.ConfigLoader{
+			Cache:     mgr.GetCache(),
+			Client:    mgr.GetClient(),
+			Namespace: pushConfigNamespace,
+			Name:      pushConfigName,
+			Log:       setupLog.WithName("push-config"),
+		}
+		if err := mgr.Add(pushLoader); err != nil {
+			setupLog.Error(err, "Failed to register push ConfigLoader")
+			os.Exit(1)
+		}
+	}
+
 	if err := (&controller.BMCReconciler{
 		Client:                mgr.GetClient(),
 		Scheme:                mgr.GetScheme(),
 		MaxConcurrentConnects: maxConcurrentConnects,
+		ConfigLoader:          pushLoader,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "BMC")
 		os.Exit(1)
+	}
+
+	if pushEventsAddr != "" && pushReceiverURL != "" {
+		if err := push.AddTo(mgr, &push.Options{
+			ReceiverURL:     pushReceiverURL,
+			EventsAddr:      pushEventsAddr,
+			SubscriberID:    pushSubscriberID,
+			ConfigName:      pushConfigName,
+			ConfigNamespace: pushConfigNamespace,
+		}); err != nil {
+			setupLog.Error(err, "Failed to set up push pipeline")
+			os.Exit(1)
+		}
 	}
 	// +kubebuilder:scaffold:builder
 

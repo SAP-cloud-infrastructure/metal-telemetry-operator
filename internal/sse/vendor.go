@@ -18,8 +18,9 @@ import (
 type Mode string
 
 const (
-	ModeSSE         Mode = "SSE"
-	ModeUnsupported Mode = "Unsupported"
+	ModeSSE          Mode = "SSE"
+	ModeMetricReport Mode = "MetricReport"
+	ModeUnsupported  Mode = "Unsupported"
 )
 
 // FilterSyntax describes the SSE filter URL encoding required by this BMC vendor.
@@ -32,14 +33,15 @@ const (
 
 // VendorConfig holds the result of an EventService probe.
 type VendorConfig struct {
-	Mode         Mode
-	SSEURI       string
-	FilterSyntax FilterSyntax
+	Mode           Mode
+	SSEURI         string
+	FilterSyntax   FilterSyntax
+	ServiceEnabled bool
 }
 
 // SSEURL returns the full SSE URL with the MetricReport filter applied.
 func (vc VendorConfig) SSEURL() string {
-	if vc.Mode == ModeUnsupported {
+	if vc.Mode != ModeSSE {
 		return ""
 	}
 	switch vc.FilterSyntax {
@@ -64,6 +66,7 @@ func insecureHTTPClient() *http.Client {
 type eventServiceResponse struct {
 	ODataType                    string `json:"@odata.type"`
 	ServerSentEventURI           string `json:"ServerSentEventUri"`
+	ServiceEnabled               bool   `json:"ServiceEnabled"`
 	SSEFilterPropertiesSupported *struct {
 		EventFormatType bool `json:"EventFormatType"`
 	} `json:"SSEFilterPropertiesSupported"`
@@ -106,8 +109,11 @@ func ProbeEventService(ctx context.Context, host, username, password string) (Ve
 }
 
 func detectVendor(es eventServiceResponse) VendorConfig {
-	// Case 1: no SSE URI — unsupported
+	// Case 1: no SSE URI — check if EventService is enabled for push (MetricReport) mode.
 	if es.ServerSentEventURI == "" {
+		if es.ServiceEnabled {
+			return VendorConfig{Mode: ModeMetricReport, ServiceEnabled: true}
+		}
 		return VendorConfig{Mode: ModeUnsupported}
 	}
 
@@ -120,7 +126,7 @@ func detectVendor(es eventServiceResponse) VendorConfig {
 		}
 	}
 
-	// Case 3: standardised /redfish/v1/SSE path → newer Dell iDRAC9 firmware and HPE iLO.
+	// Case 3: standardised /redfish/v1/SSE path → newer Dell iDRAC9 firmware.
 	// These require unquoted OData filter syntax.
 	if strings.HasSuffix(es.ServerSentEventURI, "/SSE") {
 		return VendorConfig{
