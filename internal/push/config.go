@@ -4,6 +4,8 @@
 // Package push implements MetricReport push subscription management for BMC telemetry.
 package push
 
+// +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
+
 import (
 	"context"
 	"errors"

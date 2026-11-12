@@ -3,6 +3,12 @@
 
 package controller
 
+// +kubebuilder:rbac:groups=metal.ironcore.dev,resources=bmcs,verbs=get;list;watch
+// +kubebuilder:rbac:groups=metal.ironcore.dev,resources=bmcsecrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=telemetry.metal.ironcore.dev,resources=bmctelemetries,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=telemetry.metal.ironcore.dev,resources=bmctelemetries/finalizers,verbs=update
+// +kubebuilder:rbac:groups=telemetry.metal.ironcore.dev,resources=bmctelemetries/status,verbs=get;update;patch
+
 import (
 	"context"
 	"fmt"
@@ -28,10 +34,6 @@ import (
 )
 
 // BMCReconciler reconciles metal-operator BMC resources and manages SSE telemetry connections.
-// +kubebuilder:rbac:groups=metal.ironcore.dev,resources=bmcs,verbs=get;list;watch
-// +kubebuilder:rbac:groups=metal.ironcore.dev,resources=bmcsecrets,verbs=get;list;watch
-// +kubebuilder:rbac:groups=telemetry.metal.ironcore.dev,resources=bmctelemetries,verbs=get;list;watch;create;update;patch;delete
-// +kubebuilder:rbac:groups=telemetry.metal.ironcore.dev,resources=bmctelemetries/status,verbs=get;update;patch
 type BMCReconciler struct {
 	client.Client
 	Scheme                *runtime.Scheme

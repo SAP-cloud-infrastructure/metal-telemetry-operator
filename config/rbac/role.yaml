@@ -5,9 +5,9 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
-  - metal.ironcore.dev
+  - ""
   resources:
-  - bmcs
+  - configmaps
   verbs:
   - get
   - list
@@ -15,6 +15,7 @@ rules:
 - apiGroups:
   - metal.ironcore.dev
   resources:
+  - bmcs
   - bmcsecrets
   verbs:
   - get
