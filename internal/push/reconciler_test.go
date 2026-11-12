@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 
+	redfishschemas "github.com/stmcginnis/gofish/schemas"
+
 	metalv1alpha1 "github.com/ironcore-dev/metal-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -22,6 +24,11 @@ import (
 // ---------------------------------------------------------------------------
 // Fake Redfish client
 // ---------------------------------------------------------------------------
+
+const (
+	fmtMetricReport = "MetricReport"
+	fmtEvent        = "Event"
+)
 
 type fakeRedfishClient struct {
 	mu   sync.Mutex
@@ -49,15 +56,16 @@ func (f *fakeRedfishClient) ListEventSubscriptions(_ context.Context) ([]push.Su
 	return cp, nil
 }
 
-func (f *fakeRedfishClient) CreateEventSubscription(_ context.Context, destination, eventFormatType string) (string, error) {
+func (f *fakeRedfishClient) CreateEventSubscription(_ context.Context, destination string, eventFormatType redfishschemas.EventFormatType, _ redfishschemas.DeliveryRetryPolicy) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.createErr != nil {
 		return "", f.createErr
 	}
-	f.createCalls = append(f.createCalls, createCall{destination: destination, eventFormatType: eventFormatType})
-	uri := "/redfish/v1/EventService/Subscriptions/" + eventFormatType
-	f.subs = append(f.subs, push.Subscription{URI: uri, Destination: destination, EventFormat: eventFormatType})
+	fmtStr := string(eventFormatType)
+	f.createCalls = append(f.createCalls, createCall{destination: destination, eventFormatType: fmtStr})
+	uri := "/redfish/v1/EventService/Subscriptions/" + fmtStr
+	f.subs = append(f.subs, push.Subscription{URI: uri, Destination: destination, EventFormat: fmtStr})
 	return uri, nil
 }
 
@@ -75,14 +83,18 @@ func (f *fakeRedfishClient) DeleteEventSubscription(_ context.Context, uri strin
 	return nil
 }
 
-func (f *fakeRedfishClient) Close() {}
+func (f *fakeRedfishClient) Logout() {}
+
+func (f *fakeRedfishClient) ProbeEventService(_ context.Context) (*push.EventServiceCapabilities, error) {
+	return &push.EventServiceCapabilities{ServiceEnabled: true, HasSubscriptions: true}, nil
+}
 
 type fakeFactory struct {
 	mu     sync.Mutex
 	client *fakeRedfishClient
 }
 
-func (ff *fakeFactory) NewClient(_ context.Context, _, _, _ string) (push.Client, error) {
+func (ff *fakeFactory) NewClient(_ context.Context, _, _, _ string, _ bool) (push.Client, error) {
 	ff.mu.Lock()
 	defer ff.mu.Unlock()
 	return ff.client, nil
@@ -186,10 +198,10 @@ func TestSubscriptionReconciler_createsSubscriptionsOnFirstReconcile(t *testing.
 	}
 	hasMetrics, hasAlerts := false, false
 	for _, c := range calls {
-		if c.eventFormatType == testEventFormatMetrics {
+		if c.eventFormatType == fmtMetricReport {
 			hasMetrics = true
 		}
-		if c.eventFormatType == testEventFormatAlerts {
+		if c.eventFormatType == fmtEvent {
 			hasAlerts = true
 		}
 	}
@@ -212,12 +224,12 @@ func TestSubscriptionReconciler_doesNotDuplicateExistingSubscriptions(t *testing
 			{
 				URI:         "/redfish/v1/EventService/Subscriptions/1",
 				Destination: receiverURL + "/serverevents/" + subID + "/metricsreport/" + bmcName,
-				EventFormat: testEventFormatMetrics,
+				EventFormat: fmtMetricReport,
 			},
 			{
 				URI:         "/redfish/v1/EventService/Subscriptions/2",
 				Destination: receiverURL + "/serverevents/" + subID + "/alerts/" + bmcName,
-				EventFormat: testEventFormatAlerts,
+				EventFormat: fmtEvent,
 			},
 		},
 	}
@@ -252,12 +264,12 @@ func TestSubscriptionReconciler_deletesSubscriptionsWhenModeNotMetricReport(t *t
 			{
 				URI:         "/redfish/v1/EventService/Subscriptions/1",
 				Destination: receiverURL + "/serverevents/" + subID + "/metricsreport/" + bmcName,
-				EventFormat: testEventFormatMetrics,
+				EventFormat: fmtMetricReport,
 			},
 			{
 				URI:         "/redfish/v1/EventService/Subscriptions/2",
 				Destination: receiverURL + "/serverevents/" + subID + "/alerts/" + bmcName,
-				EventFormat: testEventFormatAlerts,
+				EventFormat: fmtEvent,
 			},
 		},
 	}
@@ -294,7 +306,7 @@ func TestSubscriptionReconciler_deletesStaleAndCreatesNew(t *testing.T) {
 			{
 				URI:         "/redfish/v1/EventService/Subscriptions/old",
 				Destination: oldURL + "/serverevents/" + subID + "/metricsreport/" + bmcName,
-				EventFormat: testEventFormatMetrics,
+				EventFormat: fmtMetricReport,
 			},
 		},
 	}
@@ -388,12 +400,12 @@ func TestClassify_currentAndStale(t *testing.T) {
 
 	// Put two stale + two current subscriptions on the fake client.
 	fc.subs = []push.Subscription{
-		{URI: "/r/old1", Destination: oldURL + "/serverevents/" + subID + "/metricsreport/" + bmcName, EventFormat: testEventFormatMetrics},
-		{URI: "/r/old2", Destination: oldURL + "/serverevents/" + subID + "/alerts/" + bmcName, EventFormat: testEventFormatAlerts},
-		{URI: "/r/new1", Destination: newURL + "/serverevents/" + subID + "/metricsreport/" + bmcName, EventFormat: testEventFormatMetrics},
-		{URI: "/r/new2", Destination: newURL + "/serverevents/" + subID + "/alerts/" + bmcName, EventFormat: testEventFormatAlerts},
+		{URI: "/r/old1", Destination: oldURL + "/serverevents/" + subID + "/metricsreport/" + bmcName, EventFormat: "MetricReport"},
+		{URI: "/r/old2", Destination: oldURL + "/serverevents/" + subID + "/alerts/" + bmcName, EventFormat: fmtEvent},
+		{URI: "/r/new1", Destination: newURL + "/serverevents/" + subID + "/metricsreport/" + bmcName, EventFormat: fmtMetricReport},
+		{URI: "/r/new2", Destination: newURL + "/serverevents/" + subID + "/alerts/" + bmcName, EventFormat: fmtEvent},
 		// Foreign subscription — should be ignored.
-		{URI: "/r/other", Destination: "http://other-system/webhook", EventFormat: testEventFormatAlerts},
+		{URI: "/r/other", Destination: "http://other-system/webhook", EventFormat: fmtEvent},
 	}
 
 	r := newReconciler(t, ff, newURL, subID, b, bt, sec)

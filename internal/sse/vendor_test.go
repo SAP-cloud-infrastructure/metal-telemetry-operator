@@ -15,16 +15,20 @@ import (
 )
 
 type eventServiceFixture struct {
-	ODataType                    string `json:"@odata.type"`
-	ServerSentEventURI           string `json:"ServerSentEventUri,omitempty"`
-	ServiceEnabled               bool   `json:"ServiceEnabled,omitempty"`
+	ODataType          string   `json:"@odata.type"`
+	ServerSentEventURI string   `json:"ServerSentEventUri,omitempty"`
+	ServiceEnabled     bool     `json:"ServiceEnabled,omitempty"`
+	EventFormatTypes   []string `json:"EventFormatTypes,omitempty"`
+	Subscriptions      *struct {
+		ODataID string `json:"@odata.id"`
+	} `json:"Subscriptions,omitempty"`
 	SSEFilterPropertiesSupported *struct {
 		EventFormatType bool `json:"EventFormatType"`
 	} `json:"SSEFilterPropertiesSupported,omitempty"`
 }
 
 const testSSEURI = "/redfish/v1/EventService/ServerSentEvent"
-const testEventServiceTypeV1_10_0 = "#EventService.v1_10_0.EventService"
+const testODataType = "#EventService.v1_10_0.EventService"
 
 func serveFixture(t *testing.T, fix eventServiceFixture) (host string, shutdown func()) {
 	t.Helper()
@@ -41,7 +45,7 @@ func TestProbeEventService_hpeILO_MetricReport(t *testing.T) {
 	// HPE iLO: EventService.ServiceEnabled=true but no ServerSentEventUri.
 	// Expected: ModeMetricReport (push subscriptions available, no SSE).
 	host, shutdown := serveFixture(t, eventServiceFixture{
-		ODataType:      testEventServiceTypeV1_10_0,
+		ODataType:      testODataType,
 		ServiceEnabled: true,
 	})
 	defer shutdown()
@@ -64,7 +68,7 @@ func TestProbeEventService_hpeILO_MetricReport(t *testing.T) {
 func TestProbeEventService_noSSEURI_serviceDisabled(t *testing.T) {
 	// No SSE URI and ServiceEnabled=false → Unsupported (not MetricReport).
 	host, shutdown := serveFixture(t, eventServiceFixture{
-		ODataType: testEventServiceTypeV1_10_0,
+		ODataType: testODataType,
 	})
 	defer shutdown()
 
@@ -149,7 +153,7 @@ func TestProbeEventService_dellIDRAC10(t *testing.T) {
 
 func TestProbeEventService_dellIDRAC9(t *testing.T) {
 	host, shutdown := serveFixture(t, eventServiceFixture{
-		ODataType:          testEventServiceTypeV1_10_0,
+		ODataType:          "#EventService.v1_10_0.EventService",
 		ServerSentEventURI: testSSEURI,
 	})
 	defer shutdown()
@@ -160,5 +164,64 @@ func TestProbeEventService_dellIDRAC9(t *testing.T) {
 	}
 	if cfg.FilterSyntax != sse.FilterSyntaxUnquoted {
 		t.Errorf("expected Unquoted for iDRAC9, got %v", cfg.FilterSyntax)
+	}
+}
+
+func TestProbeEventService_serviceDisabled_subscriptionsPresent(t *testing.T) {
+	// HPE iLO variant: ServiceEnabled=false but Subscriptions collection is present.
+	// Old heuristic → Unsupported. New heuristic → MetricReport.
+	host, shutdown := serveFixture(t, eventServiceFixture{
+		ODataType: testODataType,
+		// ServiceEnabled intentionally omitted (false)
+		Subscriptions: &struct {
+			ODataID string `json:"@odata.id"`
+		}{ODataID: "/redfish/v1/EventService/Subscriptions"},
+	})
+	defer shutdown()
+
+	cfg, err := sse.ProbeEventService(context.Background(), host, "admin", "pass")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Mode != sse.ModeMetricReport {
+		t.Errorf("expected MetricReport (subscriptions link present), got %v", cfg.Mode)
+	}
+}
+
+func TestProbeEventService_eventFormatTypes_MetricReport(t *testing.T) {
+	// BMC that advertises EventFormatTypes=["MetricReport"] without ServiceEnabled.
+	host, shutdown := serveFixture(t, eventServiceFixture{
+		ODataType:        "#EventService.v1_10_0.EventService",
+		EventFormatTypes: []string{"MetricReport"},
+		// ServiceEnabled intentionally omitted (false)
+	})
+	defer shutdown()
+
+	cfg, err := sse.ProbeEventService(context.Background(), host, "admin", "pass")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Mode != sse.ModeMetricReport {
+		t.Errorf("expected MetricReport (EventFormatTypes contains MetricReport), got %v", cfg.Mode)
+	}
+	if len(cfg.EventFormatTypes) == 0 || cfg.EventFormatTypes[0] != "MetricReport" {
+		t.Errorf("expected EventFormatTypes to be propagated, got %v", cfg.EventFormatTypes)
+	}
+}
+
+func TestProbeEventService_noSignals_unsupported(t *testing.T) {
+	// No SSE URI, no EventFormatTypes, no Subscriptions, ServiceEnabled=false.
+	// Must remain Unsupported — not a false-positive MetricReport.
+	host, shutdown := serveFixture(t, eventServiceFixture{
+		ODataType: testODataType,
+	})
+	defer shutdown()
+
+	cfg, err := sse.ProbeEventService(context.Background(), host, "admin", "pass")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.Mode != sse.ModeUnsupported {
+		t.Errorf("expected Unsupported (no positive signals), got %v", cfg.Mode)
 	}
 }

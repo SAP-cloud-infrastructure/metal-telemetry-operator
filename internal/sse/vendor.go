@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 )
 
@@ -33,10 +34,11 @@ const (
 
 // VendorConfig holds the result of an EventService probe.
 type VendorConfig struct {
-	Mode           Mode
-	SSEURI         string
-	FilterSyntax   FilterSyntax
-	ServiceEnabled bool
+	Mode             Mode
+	SSEURI           string
+	FilterSyntax     FilterSyntax
+	ServiceEnabled   bool
+	EventFormatTypes []string // formats advertised by the BMC (e.g. "MetricReport", "Event")
 }
 
 // SSEURL returns the full SSE URL with the MetricReport filter applied.
@@ -64,9 +66,15 @@ func insecureHTTPClient() *http.Client {
 
 // eventServiceResponse is the subset of the Redfish EventService we need.
 type eventServiceResponse struct {
-	ODataType                    string `json:"@odata.type"`
-	ServerSentEventURI           string `json:"ServerSentEventUri"`
-	ServiceEnabled               bool   `json:"ServiceEnabled"`
+	ODataType          string   `json:"@odata.type"`
+	ServerSentEventURI string   `json:"ServerSentEventUri"`
+	ServiceEnabled     bool     `json:"ServiceEnabled"`
+	EventFormatTypes   []string `json:"EventFormatTypes"`
+	// Subscriptions is the push-subscription collection link. Present when the
+	// BMC supports MetricReport/Event push regardless of ServiceEnabled.
+	Subscriptions struct {
+		ODataID string `json:"@odata.id"`
+	} `json:"Subscriptions"`
 	SSEFilterPropertiesSupported *struct {
 		EventFormatType bool `json:"EventFormatType"`
 	} `json:"SSEFilterPropertiesSupported"`
@@ -109,10 +117,20 @@ func ProbeEventService(ctx context.Context, host, username, password string) (Ve
 }
 
 func detectVendor(es eventServiceResponse) VendorConfig {
-	// Case 1: no SSE URI — check if EventService is enabled for push (MetricReport) mode.
+	// Case 1: no SSE URI — look for positive evidence of MetricReport push support.
+	// Three independent signals, any one is sufficient:
+	//   a) "MetricReport" listed in EventFormatTypes (authoritative)
+	//   b) Subscriptions collection link present (push endpoint reachable)
+	//   c) ServiceEnabled=true (legacy heuristic; some firmware omits the above)
 	if es.ServerSentEventURI == "" {
-		if es.ServiceEnabled {
-			return VendorConfig{Mode: ModeMetricReport, ServiceEnabled: true}
+		hasMetricReportFormat := containsString(es.EventFormatTypes, "MetricReport")
+		hasSubscriptions := es.Subscriptions.ODataID != ""
+		if hasMetricReportFormat || hasSubscriptions || es.ServiceEnabled {
+			return VendorConfig{
+				Mode:             ModeMetricReport,
+				ServiceEnabled:   true,
+				EventFormatTypes: es.EventFormatTypes,
+			}
 		}
 		return VendorConfig{Mode: ModeUnsupported}
 	}
@@ -120,9 +138,10 @@ func detectVendor(es eventServiceResponse) VendorConfig {
 	// Case 2: @odata.type contains v1_11_0 → Dell iDRAC10 (quoted filter)
 	if strings.Contains(es.ODataType, "v1_11_0") {
 		return VendorConfig{
-			Mode:         ModeSSE,
-			SSEURI:       es.ServerSentEventURI,
-			FilterSyntax: FilterSyntaxQuoted,
+			Mode:             ModeSSE,
+			SSEURI:           es.ServerSentEventURI,
+			FilterSyntax:     FilterSyntaxQuoted,
+			EventFormatTypes: es.EventFormatTypes,
 		}
 	}
 
@@ -130,9 +149,10 @@ func detectVendor(es eventServiceResponse) VendorConfig {
 	// These require unquoted OData filter syntax.
 	if strings.HasSuffix(es.ServerSentEventURI, "/SSE") {
 		return VendorConfig{
-			Mode:         ModeSSE,
-			SSEURI:       es.ServerSentEventURI,
-			FilterSyntax: FilterSyntaxUnquoted,
+			Mode:             ModeSSE,
+			SSEURI:           es.ServerSentEventURI,
+			FilterSyntax:     FilterSyntaxUnquoted,
+			EventFormatTypes: es.EventFormatTypes,
 		}
 	}
 
@@ -141,16 +161,23 @@ func detectVendor(es eventServiceResponse) VendorConfig {
 	// These require the quoted OData filter form.
 	if es.SSEFilterPropertiesSupported != nil {
 		return VendorConfig{
-			Mode:         ModeSSE,
-			SSEURI:       es.ServerSentEventURI,
-			FilterSyntax: FilterSyntaxQuoted,
+			Mode:             ModeSSE,
+			SSEURI:           es.ServerSentEventURI,
+			FilterSyntax:     FilterSyntaxQuoted,
+			EventFormatTypes: es.EventFormatTypes,
 		}
 	}
 
 	// Case 5: SSE URI present, none of the above → oldest firmware (unquoted)
 	return VendorConfig{
-		Mode:         ModeSSE,
-		SSEURI:       es.ServerSentEventURI,
-		FilterSyntax: FilterSyntaxUnquoted,
+		Mode:             ModeSSE,
+		SSEURI:           es.ServerSentEventURI,
+		FilterSyntax:     FilterSyntaxUnquoted,
+		EventFormatTypes: es.EventFormatTypes,
 	}
+}
+
+// containsString reports whether s appears in slice.
+func containsString(slice []string, s string) bool {
+	return slices.Contains(slice, s)
 }

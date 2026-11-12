@@ -5,9 +5,18 @@ metadata:
   name: manager-role
 rules:
 - apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - create
+  - patch
+- apiGroups:
   - metal.ironcore.dev
   resources:
   - bmcs
+  - bmcsecrets
+  - servers
   verbs:
   - get
   - list
@@ -15,11 +24,10 @@ rules:
 - apiGroups:
   - metal.ironcore.dev
   resources:
-  - bmcsecrets
+  - servers/status
   verbs:
   - get
-  - list
-  - watch
+  - patch
 - apiGroups:
   - telemetry.metal.ironcore.dev
   resources:
@@ -32,12 +40,6 @@ rules:
   - patch
   - update
   - watch
-- apiGroups:
-  - telemetry.metal.ironcore.dev
-  resources:
-  - bmctelemetries/finalizers
-  verbs:
-  - update
 - apiGroups:
   - telemetry.metal.ironcore.dev
   resources:

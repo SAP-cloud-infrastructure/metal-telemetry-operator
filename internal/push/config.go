@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"sync/atomic"
+	"time"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
@@ -41,6 +42,18 @@ type Config struct {
 	// ModeOverrides maps vendor/model patterns to a forced TelemetryMode,
 	// overriding auto-detection for matching BMCs.
 	ModeOverrides []ModeOverrideRule `yaml:"modeOverrides,omitempty"`
+
+	// AlertmanagerURL is optional. When set, Critical Redfish events are
+	// forwarded to Alertmanager's /api/v2/alerts endpoint.
+	AlertmanagerURL string `yaml:"alertmanagerURL,omitempty"`
+
+	// TestEventInterval is the cadence for pipeline health-check SubmitTestEvent
+	// calls. 0 or absent disables health checks.
+	TestEventInterval time.Duration `yaml:"testEventInterval,omitempty"`
+
+	// TestEventTimeout caps how long we wait for a test event round-trip.
+	// Defaults to 30s when unset.
+	TestEventTimeout time.Duration `yaml:"testEventTimeout,omitempty"`
 }
 
 // ExcludeHardwareRule opts a vendor/model combination out of telemetry collection.
