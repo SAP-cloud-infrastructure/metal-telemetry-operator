@@ -123,6 +123,7 @@ func AddTo(mgr ctrl.Manager, opts *Options) error {
 		InsecureTLS:  opts.InsecureTLS,
 		Sink:         eventSink,
 		AlertHandler: gaugeForgetHandler{alertGauge: alertGauge},
+		ConfigLoader: opts.ConfigLoader,
 		Log:          log.WithName("reconciler"),
 	})
 

@@ -7,6 +7,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	redfishschemas "github.com/stmcginnis/gofish/schemas"
 
@@ -34,10 +35,11 @@ type fakeRedfishClient struct {
 	mu   sync.Mutex
 	subs []push.Subscription
 
-	createCalls []createCall
-	deleteCalls []string
-	createErr   error
-	listErr     error
+	createCalls     []createCall
+	deleteCalls     []string
+	submitTestCalls []string
+	createErr       error
+	listErr         error
 }
 
 type createCall struct {
@@ -87,6 +89,13 @@ func (f *fakeRedfishClient) Logout() {}
 
 func (f *fakeRedfishClient) ProbeEventService(_ context.Context) (*push.EventServiceCapabilities, error) {
 	return &push.EventServiceCapabilities{ServiceEnabled: true, HasSubscriptions: true}, nil
+}
+
+func (f *fakeRedfishClient) SubmitTestEvent(_ context.Context, msgID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.submitTestCalls = append(f.submitTestCalls, msgID)
+	return nil
 }
 
 type fakeFactory struct {
@@ -152,6 +161,11 @@ func testBMCTelemetry(name string, mode telemetryv1alpha1.TelemetryMode) *teleme
 
 func newReconciler(t *testing.T, ff *fakeFactory, receiverURL, subscriberID string, objs ...runtime.Object) *push.SubscriptionReconciler {
 	t.Helper()
+	return newReconcilerWithLoader(t, ff, receiverURL, subscriberID, nil, objs...)
+}
+
+func newReconcilerWithLoader(t *testing.T, ff *fakeFactory, receiverURL, subscriberID string, loader *push.ConfigLoader, objs ...runtime.Object) *push.SubscriptionReconciler {
+	t.Helper()
 	s := newTestScheme(t)
 	b := fake.NewClientBuilder().WithScheme(s)
 	for _, o := range objs {
@@ -162,6 +176,7 @@ func newReconciler(t *testing.T, ff *fakeFactory, receiverURL, subscriberID stri
 		ReceiverURL:  receiverURL,
 		SubscriberID: subscriberID,
 		Factory:      ff,
+		ConfigLoader: loader,
 	})
 }
 
@@ -454,4 +469,78 @@ func containsStr(s, sub string) bool {
 		}
 		return false
 	}())
+}
+
+// ---------------------------------------------------------------------------
+// Test event round-trip
+// ---------------------------------------------------------------------------
+
+func TestSubscriptionReconciler_submitsTestEventAfterCreate(t *testing.T) {
+	const receiverURL = "http://receiver:9093"
+	const subID = "sub1"
+	const bmcName = "node1"
+
+	fc := &fakeRedfishClient{}
+	ff := &fakeFactory{client: fc}
+	b := testBMC(bmcName, "10.0.0.1")
+	bt := testBMCTelemetry(bmcName, telemetryv1alpha1.TelemetryModeMetricReport)
+	sec := testBMCSecret(bmcName)
+
+	loader := &push.ConfigLoader{}
+	loader.StoreConfig(&push.Config{
+		APIVersion:        "telemetry.metal.ironcore.dev/v1alpha1",
+		TestEventInterval: 5 * time.Minute,
+		TestEventTimeout:  10 * time.Second,
+	})
+
+	r := newReconcilerWithLoader(t, ff, receiverURL, subID, loader, b, bt, sec)
+
+	result, err := reconcileOnce(t, r, bmcName)
+	if err != nil {
+		t.Fatalf("Reconcile: %v", err)
+	}
+
+	// Two subscriptions should have been created.
+	fc.mu.Lock()
+	creates := fc.createCalls
+	testCalls := fc.submitTestCalls
+	fc.mu.Unlock()
+
+	if len(creates) != 2 {
+		t.Errorf("expected 2 CreateEventSubscription calls, got %d", len(creates))
+	}
+
+	// SubmitTestEvent should have been called once.
+	if len(testCalls) != 1 {
+		t.Fatalf("expected 1 SubmitTestEvent call, got %d: %v", len(testCalls), testCalls)
+	}
+	msgID := testCalls[0]
+	if !containsStr(msgID, "TestEvent.MTO.") {
+		t.Errorf("expected msgID to contain TestEvent.MTO., got %q", msgID)
+	}
+
+	// Result should requeue after the timeout to check if round-trip arrived.
+	if result.RequeueAfter <= 0 {
+		t.Errorf("expected RequeueAfter > 0, got %v", result.RequeueAfter)
+	}
+
+	// Simulate the round-trip arriving: receiver calls NotifyTestEvent.
+	r.NotifyTestEvent(bmcName, msgID)
+
+	// Second reconcile: test event was confirmed, no new SubmitTestEvent since
+	// the interval hasn't elapsed (lastTestTime was just reset).
+	result2, err := reconcileOnce(t, r, bmcName)
+	if err != nil {
+		t.Fatalf("second Reconcile: %v", err)
+	}
+	if result2.RequeueAfter > 0 {
+		t.Errorf("expected no requeue on second reconcile (interval not elapsed), got %v", result2.RequeueAfter)
+	}
+
+	fc.mu.Lock()
+	testCallsAfter := fc.submitTestCalls
+	fc.mu.Unlock()
+	if len(testCallsAfter) != 1 {
+		t.Errorf("expected still 1 SubmitTestEvent call after confirmed round-trip, got %d", len(testCallsAfter))
+	}
 }

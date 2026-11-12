@@ -111,6 +111,12 @@ func (l *ConfigLoader) Config() *Config {
 	return l.current.Load()
 }
 
+// StoreConfig stores cfg as the current config. Intended for tests that need
+// a ConfigLoader with a pre-set value without starting a cache watch.
+func (l *ConfigLoader) StoreConfig(cfg *Config) {
+	l.current.Store(cfg)
+}
+
 // Start installs the watch and blocks until ctx is cancelled.
 // Implements manager.Runnable.
 func (l *ConfigLoader) Start(ctx context.Context) error {

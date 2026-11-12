@@ -56,6 +56,7 @@ type Client interface {
 	DeleteEventSubscription(ctx context.Context, uri string) error
 	ListEventSubscriptions(ctx context.Context) ([]Subscription, error)
 	ProbeEventService(ctx context.Context) (*EventServiceCapabilities, error)
+	SubmitTestEvent(ctx context.Context, msgID string) error
 	Logout()
 }
 
@@ -78,6 +79,9 @@ type ReconcilerConfig struct {
 	Sink sink.EventSink
 	// AlertHandler is called with Forget on BMC deletion. Optional.
 	AlertHandler interface{ Forget(hostname string) }
+	// ConfigLoader provides live-reloaded push config used for test event
+	// interval/timeout. Optional; when nil test events are disabled.
+	ConfigLoader *ConfigLoader
 	Log          logr.Logger
 }
 
@@ -208,8 +212,12 @@ func (r *SubscriptionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	if err := r.ensureSubscriptions(ctx, bmc); err != nil {
+	requeue, err := r.ensureSubscriptions(ctx, bmc)
+	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensure push subscriptions for %q: %w", req.Name, err)
+	}
+	if requeue > 0 {
+		return ctrl.Result{RequeueAfter: requeue}, nil
 	}
 	return ctrl.Result{}, nil
 }
@@ -226,18 +234,18 @@ func (r *SubscriptionReconciler) buildClient(ctx context.Context, bmc *metalv1al
 	return r.cfg.Factory.NewClient(ctx, ip, username, password, r.cfg.InsecureTLS)
 }
 
-func (r *SubscriptionReconciler) ensureSubscriptions(ctx context.Context, bmc *metalv1alpha1.BMC) error {
+func (r *SubscriptionReconciler) ensureSubscriptions(ctx context.Context, bmc *metalv1alpha1.BMC) (time.Duration, error) {
 	log := r.log.WithValues("bmc", bmc.Name)
 	c, err := r.buildClient(ctx, bmc)
 	if err != nil {
 		log.Info("Cannot build BMC client for subscription ensure", "err", err.Error())
-		return nil // best-effort
+		return 0, nil // best-effort
 	}
 	defer c.Logout()
 
 	subs, err := c.ListEventSubscriptions(ctx)
 	if err != nil {
-		return fmt.Errorf("list subscriptions: %w", err)
+		return 0, fmt.Errorf("list subscriptions: %w", err)
 	}
 
 	current, stale := r.classify(subs, bmc.Name)
@@ -268,7 +276,7 @@ func (r *SubscriptionReconciler) ensureSubscriptions(ctx context.Context, bmc *m
 	// Ensure the finalizer before any Create so a crash after Create but
 	// before finalizer write doesn't orphan the subscription.
 	if _, err := clientutils.PatchEnsureFinalizer(ctx, r.Client, bmc, bmcSubscriptionFinalizer); err != nil {
-		return fmt.Errorf("ensure finalizer: %w", err)
+		return 0, fmt.Errorf("ensure finalizer: %w", err)
 	}
 
 	if len(metrics) == 0 {
@@ -277,7 +285,7 @@ func (r *SubscriptionReconciler) ensureSubscriptions(ctx context.Context, bmc *m
 			redfishschemas.MetricReportEventFormatType,
 			redfishschemas.RetryForeverDeliveryRetryPolicy)
 		if err != nil {
-			return fmt.Errorf("create MetricReport subscription: %w", err)
+			return 0, fmt.Errorf("create MetricReport subscription: %w", err)
 		}
 		log.Info("Created MetricReport push subscription", "uri", uri)
 	}
@@ -287,11 +295,12 @@ func (r *SubscriptionReconciler) ensureSubscriptions(ctx context.Context, bmc *m
 			redfishschemas.EventEventFormatType,
 			redfishschemas.RetryForeverDeliveryRetryPolicy)
 		if err != nil {
-			return fmt.Errorf("create alerts subscription: %w", err)
+			return 0, fmt.Errorf("create alerts subscription: %w", err)
 		}
 		log.Info("Created alerts push subscription", "uri", uri)
 	}
-	return nil
+	requeue := r.sendTestEvent(ctx, bmc, c)
+	return requeue, nil
 }
 
 func groupByFormat(subs []Subscription) (metrics, alerts []Subscription) {
@@ -453,7 +462,68 @@ func (r *SubscriptionReconciler) NotifyTestEvent(bmcName, messageId string) {
 		return
 	}
 	r.testPending.Delete(bmcName)
+	r.lastTestTime.Store(bmcName, time.Now())
 	r.log.Info("Test event round-trip confirmed", "bmc", bmcName)
+}
+
+// testEventConfig returns the test event interval and timeout from the
+// ConfigLoader. Returns (0, 0) when the feature is disabled.
+func (r *SubscriptionReconciler) testEventConfig() (interval, timeout time.Duration) {
+	if r.cfg.ConfigLoader == nil {
+		return 0, 0
+	}
+	cfg := r.cfg.ConfigLoader.Config()
+	if cfg == nil {
+		return 0, 0
+	}
+	interval = cfg.TestEventInterval
+	if interval == 0 {
+		return 0, 0
+	}
+	timeout = cfg.TestEventTimeout
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+	return interval, timeout
+}
+
+// sendTestEvent submits a SubmitTestEvent action to the BMC and records the
+// pending round-trip. Returns the requeue duration (timeout) if a test was
+// sent, or 0 if the feature is disabled or the rate limit suppressed the send.
+func (r *SubscriptionReconciler) sendTestEvent(ctx context.Context, bmc *metalv1alpha1.BMC, c Client) time.Duration {
+	log := r.log.WithValues("bmc", bmc.Name)
+	interval, timeout := r.testEventConfig()
+	if interval == 0 {
+		return 0 // feature disabled
+	}
+
+	// Don't send if one is already pending and not yet expired.
+	if raw, ok := r.testPending.Load(bmc.Name); ok {
+		if time.Now().Before(raw.(testEntry).deadline) {
+			return 0
+		}
+		r.testPending.Delete(bmc.Name) // expired — clear and retry
+	}
+
+	// Rate-limit: skip if we sent one recently (and it was confirmed).
+	if last, ok := r.lastTestTime.Load(bmc.Name); ok {
+		if time.Since(last.(time.Time)) < interval {
+			return 0
+		}
+	}
+
+	msgID := fmt.Sprintf("TestEvent.MTO.%d", time.Now().UnixMilli())
+	if err := c.SubmitTestEvent(ctx, msgID); err != nil {
+		log.Error(err, "Failed to submit test event")
+		return 0
+	}
+	r.testPending.Store(bmc.Name, testEntry{
+		deadline: time.Now().Add(timeout),
+		msgID:    msgID,
+	})
+	r.lastTestTime.Store(bmc.Name, time.Now())
+	log.Info("Submitted test event", "msgID", msgID)
+	return timeout
 }
 
 // ---------------------------------------------------------------------------
@@ -531,6 +601,23 @@ func (c *extendedClient) ProbeEventService(_ context.Context) (*EventServiceCapa
 		ServiceEnabled:   es.ServiceEnabled,
 		HasSubscriptions: es.SubscriptionsLink != "",
 	}, nil
+}
+
+func (c *extendedClient) SubmitTestEvent(_ context.Context, msgID string) error {
+	svc := c.api.GetService()
+	if svc == nil {
+		return fmt.Errorf("submit test event: no service root")
+	}
+	es, err := svc.EventService()
+	if err != nil {
+		return fmt.Errorf("submit test event: event service: %w", err)
+	}
+	params := &redfishschemas.EventServiceSubmitTestEventParameters{}
+	if msgID != "" {
+		params.MessageID = msgID
+	}
+	_, err = es.SubmitTestEvent(params)
+	return err
 }
 
 // BMCMetricFetcher performs authenticated GET requests to fetch full MetricReport
