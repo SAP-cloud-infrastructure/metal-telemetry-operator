@@ -61,7 +61,7 @@ manager:
     allowPrivilegeEscalation: false
     capabilities:
       drop:
-      - ALL
+        - ALL
     readOnlyRootFilesystem: true
 
   ## Resource limits and requests
@@ -240,3 +240,19 @@ push:
   ##
   configNamespace: ""
 
+  ## Ingress configuration for the push receiver.
+  ## Required when receiverURL points to a cluster-internal ingress.
+  ##
+  ingress:
+    ## Ingress domain (supports Helm tpl expressions, e.g. "mto.{{ .Values.global.domain }}").
+    ##
+    domain: ""
+
+    ## Enable TLS for the ingress.
+    ##
+    tls: true
+
+    ## Additional annotations for the Ingress resource.
+    ## Example: cert-manager annotations for automatic DNS + TLS.
+    ##
+    annotations: {}

@@ -1,0 +1,45 @@
+{{- if .Values.push.receiverURL }}
+{{- $domain := tpl .Values.push.ingress.domain . }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "metal-telemetry-operator.resourceName" (dict "suffix" "push-receiver" "context" $) }}
+  namespace: {{ .Release.Namespace }}
+spec:
+  ports:
+  - name: push-receiver
+    port: 9093
+    protocol: TCP
+    targetPort: push-receiver
+  selector:
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ include "metal-telemetry-operator.resourceName" (dict "suffix" "push-receiver" "context" $) }}
+  namespace: {{ .Release.Namespace }}
+  {{- with .Values.push.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- if .Values.push.ingress.tls }}
+  tls:
+  - secretName: tls-{{ include "metal-telemetry-operator.resourceName" (dict "suffix" "push-receiver" "context" $) }}
+    hosts: [ {{ $domain }} ]
+  {{- end }}
+  rules:
+  - host: {{ $domain }}
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: {{ include "metal-telemetry-operator.resourceName" (dict "suffix" "push-receiver" "context" $) }}
+            port:
+              number: 9093
+{{- end }}
