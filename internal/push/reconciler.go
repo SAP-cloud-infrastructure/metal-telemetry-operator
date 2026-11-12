@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -27,6 +28,10 @@ import (
 
 	telemetryv1alpha1 "github.com/SAP-cloud-infrastructure/metal-telemetry-operator/api/v1alpha1"
 )
+
+// ErrSubscriptionSlotsFull is returned when a BMC rejects a subscription POST
+// with HTTP 409 indicating no free EventDestination slots remain.
+var ErrSubscriptionSlotsFull = errors.New("subscription slots full")
 
 // Subscription holds the fields of a Redfish EventDestination that we need to
 // classify and manage.
@@ -126,7 +131,7 @@ func (r *SubscriptionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	bt := &telemetryv1alpha1.BMCTelemetry{}
-	if err := r.Get(ctx, types.NamespacedName{Name: req.Name}, bt); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Name: req.Name + "-metrics"}, bt); err != nil {
 		if apierrors.IsNotFound(err) {
 			// BMCTelemetry not yet created by the bmc_reconciler; wait.
 			return ctrl.Result{}, nil
@@ -142,9 +147,22 @@ func (r *SubscriptionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	if err := r.ensureSubscriptions(ctx, bmc); err != nil {
+		if errors.Is(err, ErrSubscriptionSlotsFull) {
+			return ctrl.Result{RequeueAfter: 10 * time.Minute}, nil
+		}
 		return ctrl.Result{}, fmt.Errorf("ensure push subscriptions for %q: %w", req.Name, err)
 	}
 	return ctrl.Result{}, nil
+}
+
+func (r *SubscriptionReconciler) setConnState(ctx context.Context, name string, state telemetryv1alpha1.ConnectionState) {
+	bt := &telemetryv1alpha1.BMCTelemetry{}
+	if err := r.Get(ctx, types.NamespacedName{Name: name}, bt); err != nil {
+		return
+	}
+	patch := client.MergeFrom(bt.DeepCopy())
+	bt.Status.ConnectionState = state
+	_ = r.Status().Patch(ctx, bt, patch)
 }
 
 func (r *SubscriptionReconciler) ensureSubscriptions(ctx context.Context, bmc *metalv1alpha1.BMC) error {
@@ -194,18 +212,27 @@ func (r *SubscriptionReconciler) ensureSubscriptions(ctx context.Context, bmc *m
 		dest := r.destinationFor("metricsreport", bmc.Name)
 		uri, err := rc.CreateEventSubscription(ctx, dest, "MetricReport")
 		if err != nil {
+			if errors.Is(err, ErrSubscriptionSlotsFull) {
+				r.setConnState(ctx, bmc.Name+"-metrics", telemetryv1alpha1.ConnectionStateSlotsFull)
+			}
 			return fmt.Errorf("create MetricReport subscription: %w", err)
 		}
 		log.Info("Created MetricReport push subscription", "uri", uri)
 	}
+	r.setConnState(ctx, bmc.Name+"-metrics", telemetryv1alpha1.ConnectionStateSubscriptionActive)
+
 	if !hasAlerts {
 		dest := r.destinationFor("alerts", bmc.Name)
 		uri, err := rc.CreateEventSubscription(ctx, dest, "Event")
 		if err != nil {
+			if errors.Is(err, ErrSubscriptionSlotsFull) {
+				r.setConnState(ctx, bmc.Name+"-alerts", telemetryv1alpha1.ConnectionStateSlotsFull)
+			}
 			return fmt.Errorf("create alerts subscription: %w", err)
 		}
 		log.Info("Created alerts push subscription", "uri", uri)
 	}
+	r.setConnState(ctx, bmc.Name+"-alerts", telemetryv1alpha1.ConnectionStateSubscriptionActive)
 	return nil
 }
 
@@ -301,7 +328,8 @@ func (f *defaultClientFactory) NewClient(_ context.Context, host, username, pass
 		hc: &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+				TLSClientConfig:   &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
+				DisableKeepAlives: true,
 			},
 		},
 		base:     "https://" + host,
@@ -389,6 +417,11 @@ func (c *redfishClient) CreateEventSubscription(ctx context.Context, destination
 	respBody, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusConflict {
+			if strings.Contains(string(respBody), "ResourceInUse") || strings.Contains(string(respBody), "EventSubscriptionLimitExceeded") {
+				return "", ErrSubscriptionSlotsFull
+			}
+		}
 		return "", fmt.Errorf("POST Subscriptions returned %d: %s", resp.StatusCode, string(respBody))
 	}
 

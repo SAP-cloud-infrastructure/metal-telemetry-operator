@@ -12,6 +12,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -95,7 +96,7 @@ func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	bmc := &metalv1alpha1.BMC{}
 	if err := r.Get(ctx, req.NamespacedName, bmc); err != nil {
 		if apierrors.IsNotFound(err) {
-			r.connMgr.Stop(req.Name)
+			r.connMgr.StopBMC(req.Name)
 			r.sinkInst.Forget(req.Name)
 			return ctrl.Result{}, nil
 		}
@@ -104,7 +105,7 @@ func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 	// If the BMC is being deleted or not yet enabled, shut down any connection.
 	if !bmc.DeletionTimestamp.IsZero() || bmc.Status.State != metalv1alpha1.BMCStateEnabled {
-		r.connMgr.Stop(bmc.Name)
+		r.connMgr.StopBMC(bmc.Name)
 		r.sinkInst.Forget(bmc.Name)
 		if err := r.deleteOwnedTelemetry(ctx, bmc.Name); err != nil {
 			return ctrl.Result{}, err
@@ -112,22 +113,25 @@ func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return ctrl.Result{}, nil
 	}
 
-	// Ensure the BMCTelemetry resource exists.
-	tel, err := r.ensureTelemetry(ctx, bmc)
+	// Ensure the BMCTelemetry resources exist.
+	metricsTel, alertsTel, err := r.ensureTelemetry(ctx, bmc)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
 	// Steps 1–3: in-memory mode resolution (no BMC probe needed).
 	cfg := r.pushConfig()
-	earlyMode := r.resolveEarlyMode(bmc, tel, cfg)
+	earlyMode := r.resolveEarlyMode(bmc, metricsTel, cfg)
 
 	// Short-circuit for modes that don't require an SSE connection.
 	if earlyMode == telemetryv1alpha1.TelemetryModeExcluded ||
 		earlyMode == telemetryv1alpha1.TelemetryModeMetricReport ||
 		earlyMode == telemetryv1alpha1.TelemetryModeUnsupported {
-		r.connMgr.Stop(bmc.Name)
-		if err := r.updateTelemetryStatus(ctx, tel, earlyMode, sse.VendorConfig{}, ""); err != nil {
+		r.connMgr.StopBMC(bmc.Name)
+		if err := r.updateTelemetryStatus(ctx, metricsTel, earlyMode, sse.VendorConfig{}, ""); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.updateTelemetryStatus(ctx, alertsTel, earlyMode, sse.VendorConfig{}, ""); err != nil {
 			return ctrl.Result{}, err
 		}
 		if earlyMode != telemetryv1alpha1.TelemetryModeUnsupported && r.EnqueuePushBMC != nil {
@@ -137,30 +141,9 @@ func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 
 	// Step 4: probe the EventService (required to discover SSE URI and detect MetricReport mode).
-	username, password, err := r.fetchCredentials(ctx, bmc)
-	if err != nil {
-		log.Error(err, "Failed to fetch BMC credentials")
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-	}
-
-	host := bmc.Status.IP.String()
-	if host == "" || host == "<nil>" {
-		log.Info("BMC has no IP yet, requeueing")
-		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
-	}
-
-	// Probe the EventService to detect vendor SSE support.
-	vendorCfg, err := sse.ProbeEventService(ctx, host, username, password)
-	if err != nil {
-		log.Error(err, "EventService probe failed")
-		if err2 := r.setSchemaDetectedCondition(ctx, tel, false, err.Error()); err2 != nil {
-			log.Error(err2, "Failed to update SchemaDetected condition")
-		}
-		return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
-	}
-
-	if err := r.setSchemaDetectedCondition(ctx, tel, true, "EventService probed successfully"); err != nil {
-		log.Error(err, "Failed to update SchemaDetected condition")
+	host, username, password, vendorCfg, requeue := r.probeEventServiceForBMC(ctx, bmc, metricsTel, alertsTel)
+	if requeue > 0 {
+		return ctrl.Result{RequeueAfter: requeue}, nil
 	}
 
 	// Apply step 4 only when steps 1–3 produced no match.
@@ -172,8 +155,11 @@ func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	if mode == telemetryv1alpha1.TelemetryModeUnsupported ||
 		mode == telemetryv1alpha1.TelemetryModeExcluded ||
 		mode == telemetryv1alpha1.TelemetryModeMetricReport {
-		r.connMgr.Stop(bmc.Name)
-		if err := r.updateTelemetryStatus(ctx, tel, mode, vendorCfg, ""); err != nil {
+		r.connMgr.StopBMC(bmc.Name)
+		if err := r.updateTelemetryStatus(ctx, metricsTel, mode, vendorCfg, ""); err != nil {
+			return ctrl.Result{}, err
+		}
+		if err := r.updateTelemetryStatus(ctx, alertsTel, mode, vendorCfg, ""); err != nil {
 			return ctrl.Result{}, err
 		}
 		if mode != telemetryv1alpha1.TelemetryModeUnsupported && r.EnqueuePushBMC != nil {
@@ -182,21 +168,77 @@ func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		return ctrl.Result{}, nil
 	}
 
-	// Start or update the SSE connection.
-	connCfg := sse.ConnConfig{
+	// Start or update the SSE connections — one for metrics (MetricReport filter), one for alerts (Event filter).
+	baseCfg := sse.ConnConfig{
 		BMCName:  bmc.Name,
 		Host:     host,
 		Username: username,
 		Password: password,
 		Vendor:   vendorCfg,
 	}
-	if err := r.connMgr.Ensure(ctx, connCfg); err != nil {
-		log.Error(err, "Failed to ensure SSE connection")
+	metricsCfg := baseCfg
+	metricsCfg.StreamKind = telemetryv1alpha1.StreamKindMetrics
+	alertsCfg := baseCfg
+	alertsCfg.StreamKind = telemetryv1alpha1.StreamKindAlerts
+
+	if err := r.connMgr.Ensure(ctx, metricsCfg); err != nil {
+		log.Error(err, "Failed to ensure metrics SSE connection")
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+	if err := r.connMgr.Ensure(ctx, alertsCfg); err != nil {
+		log.Error(err, "Failed to ensure alerts SSE connection")
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
-	return ctrl.Result{}, r.updateTelemetryStatus(ctx, tel,
-		telemetryv1alpha1.TelemetryModeSSE, vendorCfg, tel.Status.ConnectionState)
+	if err := r.updateTelemetryStatus(ctx, metricsTel, telemetryv1alpha1.TelemetryModeSSE, vendorCfg, metricsTel.Status.ConnectionState); err != nil {
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{}, r.updateTelemetryStatus(ctx, alertsTel, telemetryv1alpha1.TelemetryModeSSE, vendorCfg, alertsTel.Status.ConnectionState)
+}
+
+// probeEventServiceForBMC fetches credentials, validates the BMC IP, probes the Redfish
+// EventService, and updates the SchemaDetected condition on both telemetry resources.
+// Returns (host, username, password, vendorCfg, requeue): when requeue > 0, Reconcile
+// should return ctrl.Result{RequeueAfter: requeue} immediately.
+func (r *BMCReconciler) probeEventServiceForBMC(
+	ctx context.Context,
+	bmc *metalv1alpha1.BMC,
+	metricsTel, alertsTel *telemetryv1alpha1.BMCTelemetry,
+) (host, username, password string, vendorCfg sse.VendorConfig, requeue time.Duration) {
+	log := ctrl.LoggerFrom(ctx)
+
+	var err error
+	username, password, err = r.fetchCredentials(ctx, bmc)
+	if err != nil {
+		log.Error(err, "Failed to fetch BMC credentials")
+		return "", "", "", sse.VendorConfig{}, 30 * time.Second
+	}
+
+	host = bmc.Status.IP.String()
+	if host == "" || host == "<nil>" {
+		log.Info("BMC has no IP yet, requeueing")
+		return "", "", "", sse.VendorConfig{}, 30 * time.Second
+	}
+
+	vendorCfg, err = sse.ProbeEventService(ctx, host, username, password)
+	if err != nil {
+		log.Error(err, "EventService probe failed")
+		if err2 := r.setSchemaDetectedCondition(ctx, metricsTel, false, err.Error()); err2 != nil {
+			log.Error(err2, "Failed to update SchemaDetected condition")
+		}
+		if err2 := r.setSchemaDetectedCondition(ctx, alertsTel, false, err.Error()); err2 != nil {
+			log.Error(err2, "Failed to update SchemaDetected condition")
+		}
+		return "", "", "", sse.VendorConfig{}, 5 * time.Minute
+	}
+
+	if err2 := r.setSchemaDetectedCondition(ctx, metricsTel, true, "EventService probed successfully"); err2 != nil {
+		log.Error(err2, "Failed to update SchemaDetected condition")
+	}
+	if err2 := r.setSchemaDetectedCondition(ctx, alertsTel, true, "EventService probed successfully"); err2 != nil {
+		log.Error(err2, "Failed to update SchemaDetected condition")
+	}
+	return host, username, password, vendorCfg, 0
 }
 
 // pushConfig returns the current push pipeline config, or nil when no ConfigLoader is set.
@@ -237,11 +279,24 @@ func probeModeToTelemetryMode(m sse.Mode) telemetryv1alpha1.TelemetryMode {
 	}
 }
 
-// ensureTelemetry returns the existing BMCTelemetry for this BMC or creates a new one.
-func (r *BMCReconciler) ensureTelemetry(ctx context.Context, bmc *metalv1alpha1.BMC) (*telemetryv1alpha1.BMCTelemetry, error) {
+// ensureTelemetry returns (or creates) the metrics and alerts BMCTelemetry resources for this BMC.
+func (r *BMCReconciler) ensureTelemetry(ctx context.Context, bmc *metalv1alpha1.BMC) (*telemetryv1alpha1.BMCTelemetry, *telemetryv1alpha1.BMCTelemetry, error) {
+	metricsTel, err := r.ensureOneTelemetry(ctx, bmc, bmc.Name+"-metrics", telemetryv1alpha1.StreamKindMetrics)
+	if err != nil {
+		return nil, nil, err
+	}
+	alertsTel, err := r.ensureOneTelemetry(ctx, bmc, bmc.Name+"-alerts", telemetryv1alpha1.StreamKindAlerts)
+	if err != nil {
+		return nil, nil, err
+	}
+	return metricsTel, alertsTel, nil
+}
+
+// ensureOneTelemetry returns (or creates) a single BMCTelemetry resource with the given name and stream kind.
+func (r *BMCReconciler) ensureOneTelemetry(ctx context.Context, bmc *metalv1alpha1.BMC, name string, streamKind telemetryv1alpha1.StreamKind) (*telemetryv1alpha1.BMCTelemetry, error) {
 	log := ctrl.LoggerFrom(ctx)
 	tel := &telemetryv1alpha1.BMCTelemetry{}
-	err := r.Get(ctx, types.NamespacedName{Name: bmc.Name}, tel)
+	err := r.Get(ctx, types.NamespacedName{Name: name}, tel)
 	if err == nil {
 		return tel, nil
 	}
@@ -250,23 +305,22 @@ func (r *BMCReconciler) ensureTelemetry(ctx context.Context, bmc *metalv1alpha1.
 	}
 
 	tel = &telemetryv1alpha1.BMCTelemetry{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: bmc.Name,
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: name},
+		Spec:       telemetryv1alpha1.BMCTelemetrySpec{StreamKind: streamKind},
 	}
 	if err := ctrl.SetControllerReference(bmc, tel, r.Scheme); err != nil {
 		return nil, fmt.Errorf("set owner reference: %w", err)
 	}
 	if err := r.Create(ctx, tel); err != nil {
 		if apierrors.IsAlreadyExists(err) {
-			if err2 := r.Get(ctx, types.NamespacedName{Name: bmc.Name}, tel); err2 != nil {
+			if err2 := r.Get(ctx, types.NamespacedName{Name: name}, tel); err2 != nil {
 				return nil, err2
 			}
 			return tel, nil
 		}
 		return nil, err
 	}
-	log.Info("Created BMCTelemetry", "name", bmc.Name)
+	log.Info("Created BMCTelemetry", "name", name, "streamKind", streamKind)
 	return tel, nil
 }
 
@@ -285,16 +339,21 @@ func (r *BMCReconciler) fetchCredentials(ctx context.Context, bmc *metalv1alpha1
 	return username, password, nil
 }
 
-// deleteOwnedTelemetry deletes the BMCTelemetry with the given name if it exists.
-func (r *BMCReconciler) deleteOwnedTelemetry(ctx context.Context, name string) error {
-	tel := &telemetryv1alpha1.BMCTelemetry{}
-	if err := r.Get(ctx, types.NamespacedName{Name: name}, tel); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil
+// deleteOwnedTelemetry deletes the metrics and alerts BMCTelemetry resources for the given BMC name.
+func (r *BMCReconciler) deleteOwnedTelemetry(ctx context.Context, bmcName string) error {
+	for _, suffix := range []string{"-metrics", "-alerts"} {
+		tel := &telemetryv1alpha1.BMCTelemetry{}
+		if err := r.Get(ctx, types.NamespacedName{Name: bmcName + suffix}, tel); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
+			return err
 		}
-		return err
+		if err := client.IgnoreNotFound(r.Delete(ctx, tel)); err != nil {
+			return err
+		}
 	}
-	return client.IgnoreNotFound(r.Delete(ctx, tel))
+	return nil
 }
 
 // updateTelemetryStatus patches the BMCTelemetry status with the current vendor config and connection state.
@@ -333,9 +392,10 @@ func (r *BMCReconciler) setSchemaDetectedCondition(ctx context.Context, tel *tel
 // so that SSE goroutines can update BMCTelemetry status.
 
 // SetConnected updates the Connected condition and ConnectionState on the BMCTelemetry.
-func (r *BMCReconciler) SetConnected(ctx context.Context, bmcName string, connected bool) error {
+func (r *BMCReconciler) SetConnected(ctx context.Context, bmcName string, streamKind telemetryv1alpha1.StreamKind, connected bool) error {
 	tel := &telemetryv1alpha1.BMCTelemetry{}
-	if err := r.Get(ctx, types.NamespacedName{Name: bmcName}, tel); err != nil {
+	name := bmcName + "-" + strings.ToLower(string(streamKind))
+	if err := r.Get(ctx, types.NamespacedName{Name: name}, tel); err != nil {
 		return client.IgnoreNotFound(err)
 	}
 	patch := client.MergeFrom(tel.DeepCopy())
@@ -358,9 +418,10 @@ func (r *BMCReconciler) SetConnected(ctx context.Context, bmcName string, connec
 }
 
 // IncrReconnectCount increments the reconnect counter on the BMCTelemetry.
-func (r *BMCReconciler) IncrReconnectCount(ctx context.Context, bmcName string) error {
+func (r *BMCReconciler) IncrReconnectCount(ctx context.Context, bmcName string, streamKind telemetryv1alpha1.StreamKind) error {
 	tel := &telemetryv1alpha1.BMCTelemetry{}
-	if err := r.Get(ctx, types.NamespacedName{Name: bmcName}, tel); err != nil {
+	name := bmcName + "-" + strings.ToLower(string(streamKind))
+	if err := r.Get(ctx, types.NamespacedName{Name: name}, tel); err != nil {
 		return client.IgnoreNotFound(err)
 	}
 	patch := client.MergeFrom(tel.DeepCopy())
@@ -369,9 +430,10 @@ func (r *BMCReconciler) IncrReconnectCount(ctx context.Context, bmcName string) 
 }
 
 // SetLastEventTime records the last successfully received event time on the BMCTelemetry.
-func (r *BMCReconciler) SetLastEventTime(ctx context.Context, bmcName string, t time.Time) error {
+func (r *BMCReconciler) SetLastEventTime(ctx context.Context, bmcName string, streamKind telemetryv1alpha1.StreamKind, t time.Time) error {
 	tel := &telemetryv1alpha1.BMCTelemetry{}
-	if err := r.Get(ctx, types.NamespacedName{Name: bmcName}, tel); err != nil {
+	name := bmcName + "-" + strings.ToLower(string(streamKind))
+	if err := r.Get(ctx, types.NamespacedName{Name: name}, tel); err != nil {
 		return client.IgnoreNotFound(err)
 	}
 	patch := client.MergeFrom(tel.DeepCopy())
@@ -382,3 +444,30 @@ func (r *BMCReconciler) SetLastEventTime(ctx context.Context, bmcName string, t 
 
 // Ensure BMCReconciler satisfies the sse.StatusWriter interface at compile time.
 var _ sse.StatusWriter = (*BMCReconciler)(nil)
+
+// RecordMetricReport implements push.StatusWriter — updates LastEventTime on the metrics BMCTelemetry.
+func (r *BMCReconciler) RecordMetricReport(ctx context.Context, bmcName string) {
+	tel := &telemetryv1alpha1.BMCTelemetry{}
+	if err := r.Get(ctx, types.NamespacedName{Name: bmcName + "-metrics"}, tel); err != nil {
+		return
+	}
+	patch := client.MergeFrom(tel.DeepCopy())
+	mt := metav1.NewTime(time.Now())
+	tel.Status.LastEventTime = &mt
+	_ = r.Status().Patch(ctx, tel, patch)
+}
+
+// RecordAlertEvent implements push.StatusWriter — updates LastEventTime on the alerts BMCTelemetry.
+func (r *BMCReconciler) RecordAlertEvent(ctx context.Context, bmcName string) {
+	tel := &telemetryv1alpha1.BMCTelemetry{}
+	if err := r.Get(ctx, types.NamespacedName{Name: bmcName + "-alerts"}, tel); err != nil {
+		return
+	}
+	patch := client.MergeFrom(tel.DeepCopy())
+	mt := metav1.NewTime(time.Now())
+	tel.Status.LastEventTime = &mt
+	_ = r.Status().Patch(ctx, tel, patch)
+}
+
+// Ensure BMCReconciler satisfies the push.StatusWriter interface at compile time.
+var _ push.StatusWriter = (*BMCReconciler)(nil)

@@ -52,6 +52,19 @@ func (vc VendorConfig) SSEURL() string {
 	}
 }
 
+// AlertSSEURL returns the full SSE URL with the Event (alerts) filter applied.
+func (vc VendorConfig) AlertSSEURL() string {
+	if vc.Mode != ModeSSE {
+		return ""
+	}
+	switch vc.FilterSyntax {
+	case FilterSyntaxQuoted:
+		return vc.SSEURI + "?$filter=EventFormatType%20eq%20%27Event%27"
+	default:
+		return vc.SSEURI + "?$filter=EventFormatType%20eq%20Event"
+	}
+}
+
 // insecureHTTPClient returns an HTTP client that skips TLS verification.
 // BMCs in the internal management network use self-signed certificates.
 func insecureHTTPClient() *http.Client {

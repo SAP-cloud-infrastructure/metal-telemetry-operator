@@ -35,7 +35,7 @@ const (
 )
 
 // ConnectionState describes the current SSE connection health.
-// +kubebuilder:validation:Enum=Connected;Reconnecting;Failed
+// +kubebuilder:validation:Enum=Connected;Reconnecting;Failed;SubscriptionActive;SlotsFull
 type ConnectionState string
 
 const (
@@ -45,6 +45,21 @@ const (
 	ConnectionStateReconnecting ConnectionState = "Reconnecting"
 	// ConnectionStateFailed means all reconnect attempts have been exhausted.
 	ConnectionStateFailed ConnectionState = "Failed"
+	// ConnectionStateSubscriptionActive means a MetricReport push subscription is present and receiving.
+	ConnectionStateSubscriptionActive ConnectionState = "SubscriptionActive"
+	// ConnectionStateSlotsFull means the BMC has no free EventDestination subscription slots.
+	ConnectionStateSlotsFull ConnectionState = "SlotsFull"
+)
+
+// StreamKind identifies which of the two monitored streams a BMCTelemetry resource represents.
+// +kubebuilder:validation:Enum=Metrics;Alerts
+type StreamKind string
+
+const (
+	// StreamKindMetrics represents the MetricReport (or SSE MetricReport) stream.
+	StreamKindMetrics StreamKind = "Metrics"
+	// StreamKindAlerts represents the Event (or SSE Event) alerts stream.
+	StreamKindAlerts StreamKind = "Alerts"
 )
 
 const (
@@ -62,6 +77,10 @@ type BMCTelemetrySpec struct {
 	// +optional
 	// +kubebuilder:validation:Enum=SSE;MetricReport;Unsupported;Excluded
 	ModeOverride *TelemetryMode `json:"modeOverride,omitempty"`
+
+	// streamKind identifies which of the two monitored streams this resource represents.
+	// +optional
+	StreamKind StreamKind `json:"streamKind,omitempty"`
 }
 
 // BMCTelemetryStatus defines the observed state of BMCTelemetry.
@@ -102,6 +121,7 @@ type BMCTelemetryStatus struct {
 // +kubebuilder:resource:scope=Cluster,shortName=bmctel
 // +kubebuilder:printcolumn:name="Mode",type=string,JSONPath=`.status.mode`
 // +kubebuilder:printcolumn:name="State",type=string,JSONPath=`.status.connectionState`
+// +kubebuilder:printcolumn:name="Stream",type=string,JSONPath=`.spec.streamKind`
 // +kubebuilder:printcolumn:name="Last Event",type=date,JSONPath=`.status.lastEventTime`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`
 

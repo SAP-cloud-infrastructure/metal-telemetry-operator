@@ -54,23 +54,38 @@ func (s *fakeSink) lastCall() (fakeCall, bool) {
 	return s.calls[len(s.calls)-1], true
 }
 
-// fakeStatusWriter records RecordMetricReport calls.
+// fakeStatusWriter records RecordMetricReport and RecordAlertEvent calls.
 type fakeStatusWriter struct {
-	mu    sync.Mutex
-	names []string
+	mu          sync.Mutex
+	metricNames []string
+	alertNames  []string
 }
 
 func (f *fakeStatusWriter) RecordMetricReport(_ context.Context, bmcName string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.names = append(f.names, bmcName)
+	f.metricNames = append(f.metricNames, bmcName)
+}
+
+func (f *fakeStatusWriter) RecordAlertEvent(_ context.Context, bmcName string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.alertNames = append(f.alertNames, bmcName)
 }
 
 func (f *fakeStatusWriter) recorded() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	cp := make([]string, len(f.names))
-	copy(cp, f.names)
+	cp := make([]string, len(f.metricNames))
+	copy(cp, f.metricNames)
+	return cp
+}
+
+func (f *fakeStatusWriter) recordedAlerts() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cp := make([]string, len(f.alertNames))
+	copy(cp, f.alertNames)
 	return cp
 }
 
@@ -312,6 +327,42 @@ func TestHealthz(t *testing.T) {
 	r.Handler().ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("got status %d, want 200", w.Code)
+	}
+}
+
+func TestHandleAlerts_nonResourceRemoved_calls_RecordAlertEvent(t *testing.T) {
+	fs := &fakeSink{}
+	sw := &fakeStatusWriter{}
+	r := newTestReceiver(t, "sub1", fs)
+	r.SetStatusWriter(sw)
+	body := alertBody("Alert.1.0.Alert")
+	req := httptest.NewRequest(http.MethodPost, "/serverevents/sub1/alerts/node8", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	r.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("got status %d, want 200", w.Code)
+	}
+	recorded := sw.recordedAlerts()
+	if len(recorded) != 1 || recorded[0] != "node8" {
+		t.Errorf("expected RecordAlertEvent called once with node8, got %v", recorded)
+	}
+}
+
+func TestHandleAlerts_resourceRemoved_does_not_call_RecordAlertEvent(t *testing.T) {
+	fs := &fakeSink{}
+	sw := &fakeStatusWriter{}
+	r := newTestReceiver(t, "sub1", fs)
+	r.SetStatusWriter(sw)
+	body := alertBody("ResourceEvent.1.0.ResourceRemoved")
+	req := httptest.NewRequest(http.MethodPost, "/serverevents/sub1/alerts/node9", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	r.Handler().ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("got status %d, want 200", w.Code)
+	}
+	recorded := sw.recordedAlerts()
+	if len(recorded) != 0 {
+		t.Errorf("expected RecordAlertEvent not called for ResourceRemoved, got %v", recorded)
 	}
 }
 

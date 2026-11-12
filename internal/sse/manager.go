@@ -10,10 +10,17 @@ import (
 	"github.com/go-logr/logr"
 	"golang.org/x/sync/semaphore"
 
+	telemetryv1alpha1 "github.com/SAP-cloud-infrastructure/metal-telemetry-operator/api/v1alpha1"
 	"github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/sink"
 )
 
-// ConnectionManager maintains one SSE goroutine per BMC and enforces a ceiling
+// connKey uniquely identifies one SSE connection by BMC name and stream kind.
+type connKey struct {
+	bmcName    string
+	streamKind telemetryv1alpha1.StreamKind
+}
+
+// ConnectionManager maintains one SSE goroutine per BMC stream and enforces a ceiling
 // on the number of concurrent SSE connections to prevent thundering herd on
 // operator startup.
 type ConnectionManager struct {
@@ -23,7 +30,7 @@ type ConnectionManager struct {
 	sw   StatusWriter
 	log  logr.Logger
 
-	conns map[string]*sseConn
+	conns map[connKey]*sseConn
 }
 
 // NewConnectionManager creates a ConnectionManager that allows at most
@@ -34,11 +41,11 @@ func NewConnectionManager(maxConcurrent int64, s sink.MetricReportSink, sw Statu
 		sink:  s,
 		sw:    sw,
 		log:   log,
-		conns: make(map[string]*sseConn),
+		conns: make(map[connKey]*sseConn),
 	}
 }
 
-// Ensure starts or updates the SSE connection for bmcName.
+// Ensure starts or updates the SSE connection for the given ConnConfig.
 // If a connection is already running with the same config, this is a no-op.
 // If config changed (e.g., vendor re-probed), the old connection is stopped and a
 // new one started.
@@ -46,17 +53,18 @@ func NewConnectionManager(maxConcurrent int64, s sink.MetricReportSink, sw Statu
 // Ensure acquires a semaphore slot before launching the goroutine, blocking
 // until a slot is available or ctx is cancelled.
 func (m *ConnectionManager) Ensure(ctx context.Context, cfg ConnConfig) error {
+	key := connKey{cfg.BMCName, cfg.StreamKind}
 	m.mu.Lock()
-	existing, ok := m.conns[cfg.BMCName]
+	existing, ok := m.conns[key]
 	if ok && configEqual(existing.cfg, cfg) {
 		m.mu.Unlock()
 		return nil
 	}
 	// Stop the old connection before releasing the lock so we don't race
-	// against a concurrent Ensure for the same BMC.
+	// against a concurrent Ensure for the same key.
 	if ok {
 		existing.stop()
-		delete(m.conns, cfg.BMCName)
+		delete(m.conns, key)
 	}
 	m.mu.Unlock()
 
@@ -67,7 +75,7 @@ func (m *ConnectionManager) Ensure(ctx context.Context, cfg ConnConfig) error {
 
 	m.mu.Lock()
 	// Re-check after acquiring — another goroutine may have started it.
-	if ex, ok := m.conns[cfg.BMCName]; ok && configEqual(ex.cfg, cfg) {
+	if ex, ok := m.conns[key]; ok && configEqual(ex.cfg, cfg) {
 		m.mu.Unlock()
 		m.sem.Release(1)
 		return nil
@@ -78,22 +86,39 @@ func (m *ConnectionManager) Ensure(ctx context.Context, cfg ConnConfig) error {
 		<-conn.done
 		m.sem.Release(1)
 	}()
-	m.conns[cfg.BMCName] = conn
+	m.conns[key] = conn
 	m.mu.Unlock()
 	return nil
 }
 
-// Stop terminates the SSE connection for bmcName if one is running.
+// Stop terminates the SSE connection for the given BMC name and stream kind if one is running.
 // It blocks until the goroutine has exited.
-func (m *ConnectionManager) Stop(bmcName string) {
+func (m *ConnectionManager) Stop(bmcName string, streamKind telemetryv1alpha1.StreamKind) {
+	key := connKey{bmcName, streamKind}
 	m.mu.Lock()
-	conn, ok := m.conns[bmcName]
+	conn, ok := m.conns[key]
 	if ok {
-		delete(m.conns, bmcName)
+		delete(m.conns, key)
 	}
 	m.mu.Unlock()
 	if ok {
 		conn.stop()
+	}
+}
+
+// StopBMC terminates all SSE connections for the given BMC name and waits for them to exit.
+func (m *ConnectionManager) StopBMC(bmcName string) {
+	m.mu.Lock()
+	var toStop []*sseConn
+	for k, c := range m.conns {
+		if k.bmcName == bmcName {
+			toStop = append(toStop, c)
+			delete(m.conns, k)
+		}
+	}
+	m.mu.Unlock()
+	for _, c := range toStop {
+		c.stop()
 	}
 }
 
@@ -104,7 +129,7 @@ func (m *ConnectionManager) StopAll() {
 	for _, c := range m.conns {
 		conns = append(conns, c)
 	}
-	m.conns = make(map[string]*sseConn)
+	m.conns = make(map[connKey]*sseConn)
 	m.mu.Unlock()
 
 	var wg sync.WaitGroup
@@ -125,5 +150,6 @@ func configEqual(a, b ConnConfig) bool {
 		a.Password == b.Password &&
 		a.Vendor.SSEURI == b.Vendor.SSEURI &&
 		a.Vendor.Mode == b.Vendor.Mode &&
-		a.Vendor.FilterSyntax == b.Vendor.FilterSyntax
+		a.Vendor.FilterSyntax == b.Vendor.FilterSyntax &&
+		a.StreamKind == b.StreamKind
 }

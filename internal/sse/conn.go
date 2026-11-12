@@ -15,6 +15,7 @@ import (
 
 	"github.com/go-logr/logr"
 
+	telemetryv1alpha1 "github.com/SAP-cloud-infrastructure/metal-telemetry-operator/api/v1alpha1"
 	"github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/sink"
 )
 
@@ -26,19 +27,20 @@ const (
 
 // ConnConfig holds the parameters needed to open and maintain one SSE connection.
 type ConnConfig struct {
-	BMCName  string
-	Host     string
-	Username string
-	Password string
-	Vendor   VendorConfig
+	BMCName    string
+	Host       string
+	Username   string
+	Password   string
+	Vendor     VendorConfig
+	StreamKind telemetryv1alpha1.StreamKind
 }
 
 // StatusWriter updates BMCTelemetry status from the SSE goroutine.
 // Implementations must be safe for concurrent use.
 type StatusWriter interface {
-	SetConnected(ctx context.Context, bmcName string, connected bool) error
-	IncrReconnectCount(ctx context.Context, bmcName string) error
-	SetLastEventTime(ctx context.Context, bmcName string, t time.Time) error
+	SetConnected(ctx context.Context, bmcName string, streamKind telemetryv1alpha1.StreamKind, connected bool) error
+	IncrReconnectCount(ctx context.Context, bmcName string, streamKind telemetryv1alpha1.StreamKind) error
+	SetLastEventTime(ctx context.Context, bmcName string, streamKind telemetryv1alpha1.StreamKind, t time.Time) error
 }
 
 // sseConn manages one long-lived SSE connection to a BMC.
@@ -82,8 +84,8 @@ func (c *sseConn) run(ctx context.Context) {
 		}
 		c.log.Error(err, "SSE stream ended, reconnecting", "backoff", backoff)
 		if c.sw != nil {
-			_ = c.sw.SetConnected(ctx, c.cfg.BMCName, false)
-			_ = c.sw.IncrReconnectCount(ctx, c.cfg.BMCName)
+			_ = c.sw.SetConnected(ctx, c.cfg.BMCName, c.cfg.StreamKind, false)
+			_ = c.sw.IncrReconnectCount(ctx, c.cfg.BMCName, c.cfg.StreamKind)
 		}
 		// Add jitter (±25% of backoff)
 		jitter := time.Duration(float64(backoff) * (0.75 + rand.Float64()*0.5)) //nolint:gosec
@@ -122,7 +124,7 @@ func (c *sseConn) stream(ctx context.Context) error {
 	}
 
 	if c.sw != nil {
-		_ = c.sw.SetConnected(ctx, c.cfg.BMCName, true)
+		_ = c.sw.SetConnected(ctx, c.cfg.BMCName, c.cfg.StreamKind, true)
 	}
 	c.log.Info("SSE stream connected")
 
@@ -189,7 +191,7 @@ func (c *sseConn) handleEvent(ctx context.Context, data string, lastEvent *time.
 	now := time.Now()
 	// Rate-limit status updates to once per minute to reduce API server load.
 	if c.sw != nil && now.Sub(*lastEvent) >= time.Minute {
-		_ = c.sw.SetLastEventTime(ctx, c.cfg.BMCName, now)
+		_ = c.sw.SetLastEventTime(ctx, c.cfg.BMCName, c.cfg.StreamKind, now)
 		*lastEvent = now
 	}
 }

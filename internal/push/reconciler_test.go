@@ -12,6 +12,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -27,10 +28,11 @@ type fakeRedfishClient struct {
 	mu   sync.Mutex
 	subs []push.Subscription
 
-	createCalls []createCall
-	deleteCalls []string
-	createErr   error
-	listErr     error
+	createCalls     []createCall
+	deleteCalls     []string
+	createErr       error
+	createErrByType map[string]error
+	listErr         error
 }
 
 type createCall struct {
@@ -52,6 +54,11 @@ func (f *fakeRedfishClient) ListEventSubscriptions(_ context.Context) ([]push.Su
 func (f *fakeRedfishClient) CreateEventSubscription(_ context.Context, destination, eventFormatType string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.createErrByType != nil {
+		if err := f.createErrByType[eventFormatType]; err != nil {
+			return "", err
+		}
+	}
 	if f.createErr != nil {
 		return "", f.createErr
 	}
@@ -141,7 +148,9 @@ func testBMCTelemetry(name string, mode telemetryv1alpha1.TelemetryMode) *teleme
 func newReconciler(t *testing.T, ff *fakeFactory, receiverURL, subscriberID string, objs ...runtime.Object) *push.SubscriptionReconciler {
 	t.Helper()
 	s := newTestScheme(t)
-	b := fake.NewClientBuilder().WithScheme(s)
+	b := fake.NewClientBuilder().
+		WithScheme(s).
+		WithStatusSubresource(&telemetryv1alpha1.BMCTelemetry{})
 	for _, o := range objs {
 		b = b.WithRuntimeObjects(o)
 	}
@@ -168,7 +177,7 @@ func TestSubscriptionReconciler_createsSubscriptionsOnFirstReconcile(t *testing.
 	fc := &fakeRedfishClient{}
 	ff := &fakeFactory{client: fc}
 	b := testBMC("node1", "10.0.0.1")
-	bt := testBMCTelemetry("node1", telemetryv1alpha1.TelemetryModeMetricReport)
+	bt := testBMCTelemetry("node1-metrics", telemetryv1alpha1.TelemetryModeMetricReport)
 	sec := testBMCSecret("node1")
 
 	r := newReconciler(t, ff, "http://receiver:9093", "sub1", b, bt, sec)
@@ -224,7 +233,7 @@ func TestSubscriptionReconciler_doesNotDuplicateExistingSubscriptions(t *testing
 	ff := &fakeFactory{client: fc}
 
 	b := testBMC(bmcName, "10.0.0.2")
-	bt := testBMCTelemetry(bmcName, telemetryv1alpha1.TelemetryModeMetricReport)
+	bt := testBMCTelemetry(bmcName+"-metrics", telemetryv1alpha1.TelemetryModeMetricReport)
 	sec := testBMCSecret(bmcName)
 
 	r := newReconciler(t, ff, receiverURL, subID, b, bt, sec)
@@ -264,7 +273,7 @@ func TestSubscriptionReconciler_deletesSubscriptionsWhenModeNotMetricReport(t *t
 	ff := &fakeFactory{client: fc}
 
 	b := testBMC(bmcName, "10.0.0.3")
-	bt := testBMCTelemetry(bmcName, telemetryv1alpha1.TelemetryModeSSE) // not MetricReport
+	bt := testBMCTelemetry(bmcName+"-metrics", telemetryv1alpha1.TelemetryModeSSE) // not MetricReport
 	sec := testBMCSecret(bmcName)
 
 	r := newReconciler(t, ff, receiverURL, subID, b, bt, sec)
@@ -301,7 +310,7 @@ func TestSubscriptionReconciler_deletesStaleAndCreatesNew(t *testing.T) {
 	ff := &fakeFactory{client: fc}
 
 	b := testBMC(bmcName, "10.0.0.4")
-	bt := testBMCTelemetry(bmcName, telemetryv1alpha1.TelemetryModeMetricReport)
+	bt := testBMCTelemetry(bmcName+"-metrics", telemetryv1alpha1.TelemetryModeMetricReport)
 	sec := testBMCSecret(bmcName)
 
 	r := newReconciler(t, ff, newURL, subID, b, bt, sec)
@@ -370,6 +379,25 @@ func TestSubscriptionReconciler_skipWhenBMCNotFound(t *testing.T) {
 	}
 }
 
+func TestSubscriptionReconciler_slotsFullRequeues(t *testing.T) {
+	fc := &fakeRedfishClient{
+		createErr: push.ErrSubscriptionSlotsFull,
+	}
+	ff := &fakeFactory{client: fc}
+	b := testBMC("node7", "10.0.0.7")
+	bt := testBMCTelemetry("node7-metrics", telemetryv1alpha1.TelemetryModeMetricReport)
+	sec := testBMCSecret("node7")
+
+	r := newReconciler(t, ff, "http://receiver:9093", "sub1", b, bt, sec)
+	result, err := reconcileOnce(t, r, "node7")
+	if err != nil {
+		t.Fatalf("expected no error when slots are full, got: %v", err)
+	}
+	if result.RequeueAfter == 0 {
+		t.Error("expected RequeueAfter > 0 when subscription slots are exhausted")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // classify tests
 // ---------------------------------------------------------------------------
@@ -383,7 +411,7 @@ func TestClassify_currentAndStale(t *testing.T) {
 	fc := &fakeRedfishClient{}
 	ff := &fakeFactory{client: fc}
 	b := testBMC(bmcName, "10.0.0.1")
-	bt := testBMCTelemetry(bmcName, telemetryv1alpha1.TelemetryModeMetricReport)
+	bt := testBMCTelemetry(bmcName+"-metrics", telemetryv1alpha1.TelemetryModeMetricReport)
 	sec := testBMCSecret(bmcName)
 
 	// Put two stale + two current subscriptions on the fake client.
@@ -427,6 +455,82 @@ func TestEnqueueBMC_beforeSetup_noPanic(t *testing.T) {
 	})
 	// Must not panic even though eventsCh is nil.
 	r.EnqueueBMC("node1")
+}
+
+func TestSubscriptionReconciler_perStreamConnectionState(t *testing.T) {
+	const receiverURL = "http://receiver:9093"
+	const subID = "sub1"
+	const bmcName = "nodeA"
+
+	cases := []struct {
+		name             string
+		createErrByType  map[string]error
+		wantMetricsState telemetryv1alpha1.ConnectionState
+		wantAlertsState  telemetryv1alpha1.ConnectionState
+		wantRequeue      bool
+	}{
+		{
+			name:             "both succeed",
+			wantMetricsState: telemetryv1alpha1.ConnectionStateSubscriptionActive,
+			wantAlertsState:  telemetryv1alpha1.ConnectionStateSubscriptionActive,
+			wantRequeue:      false,
+		},
+		{
+			name:             "metrics slots full",
+			createErrByType:  map[string]error{testEventFormatMetrics: push.ErrSubscriptionSlotsFull},
+			wantMetricsState: telemetryv1alpha1.ConnectionStateSlotsFull,
+			wantRequeue:      true,
+		},
+		{
+			name:             "alerts slots full",
+			createErrByType:  map[string]error{testEventFormatAlerts: push.ErrSubscriptionSlotsFull},
+			wantMetricsState: telemetryv1alpha1.ConnectionStateSubscriptionActive,
+			wantAlertsState:  telemetryv1alpha1.ConnectionStateSlotsFull,
+			wantRequeue:      true,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fc := &fakeRedfishClient{createErrByType: tc.createErrByType}
+			ff := &fakeFactory{client: fc}
+			b := testBMC(bmcName, "10.0.0.9")
+			metricsTel := testBMCTelemetry(bmcName+"-metrics", telemetryv1alpha1.TelemetryModeMetricReport)
+			alertsTel := testBMCTelemetry(bmcName+"-alerts", telemetryv1alpha1.TelemetryModeMetricReport)
+			sec := testBMCSecret(bmcName)
+
+			r := newReconciler(t, ff, receiverURL, subID, b, metricsTel, alertsTel, sec)
+			result, err := reconcileOnce(t, r, bmcName)
+			if err != nil {
+				t.Fatalf("Reconcile: %v", err)
+			}
+
+			if tc.wantRequeue && result.RequeueAfter == 0 {
+				t.Error("expected RequeueAfter > 0")
+			}
+			if !tc.wantRequeue && result.RequeueAfter != 0 {
+				t.Errorf("expected no requeue, got RequeueAfter=%v", result.RequeueAfter)
+			}
+
+			gotMetrics := &telemetryv1alpha1.BMCTelemetry{}
+			if err := r.Get(context.Background(), types.NamespacedName{Name: bmcName + "-metrics"}, gotMetrics); err != nil {
+				t.Fatalf("Get metrics: %v", err)
+			}
+			if tc.wantMetricsState != "" && gotMetrics.Status.ConnectionState != tc.wantMetricsState {
+				t.Errorf("metrics ConnectionState: got %q, want %q", gotMetrics.Status.ConnectionState, tc.wantMetricsState)
+			}
+
+			if tc.wantAlertsState != "" {
+				gotAlerts := &telemetryv1alpha1.BMCTelemetry{}
+				if err := r.Get(context.Background(), types.NamespacedName{Name: bmcName + "-alerts"}, gotAlerts); err != nil {
+					t.Fatalf("Get alerts: %v", err)
+				}
+				if gotAlerts.Status.ConnectionState != tc.wantAlertsState {
+					t.Errorf("alerts ConnectionState: got %q, want %q", gotAlerts.Status.ConnectionState, tc.wantAlertsState)
+				}
+			}
+		})
+	}
 }
 
 // ---------------------------------------------------------------------------

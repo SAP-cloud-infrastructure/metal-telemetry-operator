@@ -31,6 +31,8 @@ const (
 type StatusWriter interface {
 	// RecordMetricReport marks the BMC as connected and updates LastEventTime.
 	RecordMetricReport(ctx context.Context, bmcName string)
+	// RecordAlertEvent updates LastEventTime on the alerts BMCTelemetry resource.
+	RecordAlertEvent(ctx context.Context, bmcName string)
 }
 
 // ReceiverConfig holds all parameters for constructing a Receiver.
@@ -224,14 +226,19 @@ func (r *Receiver) handleAlerts(w http.ResponseWriter, req *http.Request) {
 	if err := json.Unmarshal(body, &env); err != nil {
 		r.log.V(1).Info("Failed to parse alert payload", "bmc", bmcName, "err", err.Error())
 	} else {
+		resourceRemoved := false
 		for _, ev := range env.Events {
 			if isResourceRemoved(ev.MessageID) {
 				r.log.Info("ResourceRemoved event detected, triggering re-subscribe", "bmc", bmcName)
 				if r.cfg.OnResourceRemoved != nil {
 					r.cfg.OnResourceRemoved(bmcName)
 				}
+				resourceRemoved = true
 				break
 			}
+		}
+		if !resourceRemoved && r.cfg.StatusWriter != nil {
+			r.cfg.StatusWriter.RecordAlertEvent(req.Context(), bmcName)
 		}
 	}
 	// Always return 200 to prevent the BMC from retrying.

@@ -40,9 +40,13 @@ func (s *nopSink) Forget(_ string)                                              
 
 type nopStatusWriter struct{}
 
-func (sw *nopStatusWriter) SetConnected(_ context.Context, _ string, _ bool) error { return nil }
-func (sw *nopStatusWriter) IncrReconnectCount(_ context.Context, _ string) error   { return nil }
-func (sw *nopStatusWriter) SetLastEventTime(_ context.Context, _ string, _ time.Time) error {
+func (sw *nopStatusWriter) SetConnected(_ context.Context, _ string, _ telemetryv1alpha1.StreamKind, _ bool) error {
+	return nil
+}
+func (sw *nopStatusWriter) IncrReconnectCount(_ context.Context, _ string, _ telemetryv1alpha1.StreamKind) error {
+	return nil
+}
+func (sw *nopStatusWriter) SetLastEventTime(_ context.Context, _ string, _ telemetryv1alpha1.StreamKind, _ time.Time) error {
 	return nil
 }
 
@@ -269,7 +273,7 @@ func TestDispatch_excluded_annotation_enqueues(t *testing.T) {
 // MetricReport mode (spec.ModeOverride) → EnqueuePushBMC IS called.
 func TestDispatch_metricReport_override_enqueues(t *testing.T) {
 	bmc := enabledBMC("bmc2", nil)
-	tel := bmcTelemetry("bmc2", ptrMode(telemetryv1alpha1.TelemetryModeMetricReport))
+	tel := bmcTelemetry("bmc2-metrics", ptrMode(telemetryv1alpha1.TelemetryModeMetricReport))
 
 	var mu sync.Mutex
 	var enqueued []string
@@ -294,7 +298,7 @@ func TestDispatch_metricReport_override_enqueues(t *testing.T) {
 // Unsupported mode (spec.ModeOverride) → EnqueuePushBMC is NOT called.
 func TestDispatch_unsupported_override_doesNotEnqueue(t *testing.T) {
 	bmc := enabledBMC("bmc3", nil)
-	tel := bmcTelemetry("bmc3", ptrMode(telemetryv1alpha1.TelemetryModeUnsupported))
+	tel := bmcTelemetry("bmc3-metrics", ptrMode(telemetryv1alpha1.TelemetryModeUnsupported))
 
 	called := false
 	r := newDispatchReconciler(t, bmc, tel)
@@ -319,5 +323,31 @@ func TestDispatch_excluded_nilCallback_noPanic(t *testing.T) {
 
 	if _, err := r.Reconcile(context.Background(), ctrl.Request{NamespacedName: types.NamespacedName{Name: "bmc4"}}); err != nil {
 		t.Fatalf("Reconcile: %v", err)
+	}
+}
+
+func TestBMCReconciler_RecordMetricReport_updatesLastEventTime(t *testing.T) {
+	tel := bmcTelemetry("bmc5-metrics", nil)
+	r := newDispatchReconciler(t, tel)
+	r.RecordMetricReport(context.Background(), "bmc5")
+	got := &telemetryv1alpha1.BMCTelemetry{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "bmc5-metrics"}, got); err != nil {
+		t.Fatalf("Get bmc5-metrics: %v", err)
+	}
+	if got.Status.LastEventTime == nil {
+		t.Error("expected LastEventTime to be set after RecordMetricReport")
+	}
+}
+
+func TestBMCReconciler_RecordAlertEvent_updatesLastEventTime(t *testing.T) {
+	tel := bmcTelemetry("bmc6-alerts", nil)
+	r := newDispatchReconciler(t, tel)
+	r.RecordAlertEvent(context.Background(), "bmc6")
+	got := &telemetryv1alpha1.BMCTelemetry{}
+	if err := r.Get(context.Background(), types.NamespacedName{Name: "bmc6-alerts"}, got); err != nil {
+		t.Fatalf("Get bmc6-alerts: %v", err)
+	}
+	if got.Status.LastEventTime == nil {
+		t.Error("expected LastEventTime to be set after RecordAlertEvent")
 	}
 }
