@@ -31,6 +31,9 @@ spec:
     - jsonPath: .status.connectionState
       name: State
       type: string
+    - jsonPath: .spec.streamKind
+      name: Stream
+      type: string
     - jsonPath: .status.lastEventTime
       name: Last Event
       type: date
@@ -72,6 +75,13 @@ spec:
                 - MetricReport
                 - Unsupported
                 - Excluded
+                type: string
+              streamKind:
+                description: streamKind identifies which of the two monitored streams
+                  this resource represents.
+                enum:
+                - Metrics
+                - Alerts
                 type: string
             type: object
           status:
@@ -144,6 +154,8 @@ spec:
                 - Connected
                 - Reconnecting
                 - Failed
+                - SubscriptionActive
+                - SlotsFull
                 type: string
               filterSyntax:
                 description: filterSyntax is the SSE filter syntax variant detected
