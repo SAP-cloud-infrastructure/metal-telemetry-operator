@@ -4,17 +4,6 @@
 name: Release Helm Chart
 
 on:
-  release:
-    types:
-      - published
-  push:
-    branches:
-      - main
-    tags:
-      - "v*.*.*"
-    paths-ignore:
-      - "docs/**"
-      - "**/*.md"
   pull_request:
     branches:
       - main

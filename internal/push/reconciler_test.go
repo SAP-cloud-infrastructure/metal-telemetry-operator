@@ -186,10 +186,10 @@ func TestSubscriptionReconciler_createsSubscriptionsOnFirstReconcile(t *testing.
 	}
 	hasMetrics, hasAlerts := false, false
 	for _, c := range calls {
-		if c.eventFormatType == "MetricReport" {
+		if c.eventFormatType == testEventFormatMetrics {
 			hasMetrics = true
 		}
-		if c.eventFormatType == "Event" {
+		if c.eventFormatType == testEventFormatAlerts {
 			hasAlerts = true
 		}
 	}
@@ -212,12 +212,12 @@ func TestSubscriptionReconciler_doesNotDuplicateExistingSubscriptions(t *testing
 			{
 				URI:         "/redfish/v1/EventService/Subscriptions/1",
 				Destination: receiverURL + "/serverevents/" + subID + "/metricsreport/" + bmcName,
-				EventFormat: "MetricReport",
+				EventFormat: testEventFormatMetrics,
 			},
 			{
 				URI:         "/redfish/v1/EventService/Subscriptions/2",
 				Destination: receiverURL + "/serverevents/" + subID + "/alerts/" + bmcName,
-				EventFormat: "Event",
+				EventFormat: testEventFormatAlerts,
 			},
 		},
 	}
@@ -252,12 +252,12 @@ func TestSubscriptionReconciler_deletesSubscriptionsWhenModeNotMetricReport(t *t
 			{
 				URI:         "/redfish/v1/EventService/Subscriptions/1",
 				Destination: receiverURL + "/serverevents/" + subID + "/metricsreport/" + bmcName,
-				EventFormat: "MetricReport",
+				EventFormat: testEventFormatMetrics,
 			},
 			{
 				URI:         "/redfish/v1/EventService/Subscriptions/2",
 				Destination: receiverURL + "/serverevents/" + subID + "/alerts/" + bmcName,
-				EventFormat: "Event",
+				EventFormat: testEventFormatAlerts,
 			},
 		},
 	}
@@ -294,7 +294,7 @@ func TestSubscriptionReconciler_deletesStaleAndCreatesNew(t *testing.T) {
 			{
 				URI:         "/redfish/v1/EventService/Subscriptions/old",
 				Destination: oldURL + "/serverevents/" + subID + "/metricsreport/" + bmcName,
-				EventFormat: "MetricReport",
+				EventFormat: testEventFormatMetrics,
 			},
 		},
 	}
@@ -388,12 +388,12 @@ func TestClassify_currentAndStale(t *testing.T) {
 
 	// Put two stale + two current subscriptions on the fake client.
 	fc.subs = []push.Subscription{
-		{URI: "/r/old1", Destination: oldURL + "/serverevents/" + subID + "/metricsreport/" + bmcName, EventFormat: "MetricReport"},
-		{URI: "/r/old2", Destination: oldURL + "/serverevents/" + subID + "/alerts/" + bmcName, EventFormat: "Event"},
-		{URI: "/r/new1", Destination: newURL + "/serverevents/" + subID + "/metricsreport/" + bmcName, EventFormat: "MetricReport"},
-		{URI: "/r/new2", Destination: newURL + "/serverevents/" + subID + "/alerts/" + bmcName, EventFormat: "Event"},
+		{URI: "/r/old1", Destination: oldURL + "/serverevents/" + subID + "/metricsreport/" + bmcName, EventFormat: testEventFormatMetrics},
+		{URI: "/r/old2", Destination: oldURL + "/serverevents/" + subID + "/alerts/" + bmcName, EventFormat: testEventFormatAlerts},
+		{URI: "/r/new1", Destination: newURL + "/serverevents/" + subID + "/metricsreport/" + bmcName, EventFormat: testEventFormatMetrics},
+		{URI: "/r/new2", Destination: newURL + "/serverevents/" + subID + "/alerts/" + bmcName, EventFormat: testEventFormatAlerts},
 		// Foreign subscription — should be ignored.
-		{URI: "/r/other", Destination: "http://other-system/webhook", EventFormat: "Event"},
+		{URI: "/r/other", Destination: "http://other-system/webhook", EventFormat: testEventFormatAlerts},
 	}
 
 	r := newReconciler(t, ff, newURL, subID, b, bt, sec)

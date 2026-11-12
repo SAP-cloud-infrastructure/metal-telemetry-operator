@@ -24,6 +24,7 @@ type eventServiceFixture struct {
 }
 
 const testSSEURI = "/redfish/v1/EventService/ServerSentEvent"
+const testEventServiceTypeV1_10_0 = "#EventService.v1_10_0.EventService"
 
 func serveFixture(t *testing.T, fix eventServiceFixture) (host string, shutdown func()) {
 	t.Helper()
@@ -40,7 +41,7 @@ func TestProbeEventService_hpeILO_MetricReport(t *testing.T) {
 	// HPE iLO: EventService.ServiceEnabled=true but no ServerSentEventUri.
 	// Expected: ModeMetricReport (push subscriptions available, no SSE).
 	host, shutdown := serveFixture(t, eventServiceFixture{
-		ODataType:      "#EventService.v1_10_0.EventService",
+		ODataType:      testEventServiceTypeV1_10_0,
 		ServiceEnabled: true,
 	})
 	defer shutdown()
@@ -63,7 +64,7 @@ func TestProbeEventService_hpeILO_MetricReport(t *testing.T) {
 func TestProbeEventService_noSSEURI_serviceDisabled(t *testing.T) {
 	// No SSE URI and ServiceEnabled=false → Unsupported (not MetricReport).
 	host, shutdown := serveFixture(t, eventServiceFixture{
-		ODataType: "#EventService.v1_10_0.EventService",
+		ODataType: testEventServiceTypeV1_10_0,
 	})
 	defer shutdown()
 
@@ -148,7 +149,7 @@ func TestProbeEventService_dellIDRAC10(t *testing.T) {
 
 func TestProbeEventService_dellIDRAC9(t *testing.T) {
 	host, shutdown := serveFixture(t, eventServiceFixture{
-		ODataType:          "#EventService.v1_10_0.EventService",
+		ODataType:          testEventServiceTypeV1_10_0,
 		ServerSentEventURI: testSSEURI,
 	})
 	defer shutdown()

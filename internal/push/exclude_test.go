@@ -46,13 +46,13 @@ func TestIsExcluded_nilBMC(t *testing.T) {
 }
 
 func TestIsExcluded_nilConfig(t *testing.T) {
-	if push.IsExcluded(bmc("HPE", "DL360", ""), nil) {
+	if push.IsExcluded(bmc(testVendorHPE, "DL360", ""), nil) {
 		t.Error("nil config: want not excluded")
 	}
 }
 
 func TestIsExcluded_excludeAnnotation(t *testing.T) {
-	b := bmcAnnotated("HPE", "DL360")
+	b := bmcAnnotated(testVendorHPE, "DL360")
 	if !push.IsExcluded(b, nil) {
 		t.Error("annotated BMC with nil config: want excluded")
 	}
@@ -63,33 +63,33 @@ func TestIsExcluded_excludeAnnotation(t *testing.T) {
 
 func TestIsExcluded_annotationBeatsCfg(t *testing.T) {
 	// Even if no ConfigMap rule matches, the annotation alone excludes the BMC.
-	b := bmcAnnotated("HPE", "DL360")
-	cfg := excludeCfg(push.ExcludeHardwareRule{Vendor: "Dell Inc.", Models: []string{"*"}})
+	b := bmcAnnotated(testVendorHPE, "DL360")
+	cfg := excludeCfg(push.ExcludeHardwareRule{Vendor: testVendorDell, Models: []string{"*"}})
 	if !push.IsExcluded(b, cfg) {
 		t.Error("annotation should beat config: want excluded")
 	}
 }
 
 func TestIsExcluded_vendorMismatch(t *testing.T) {
-	cfg := excludeCfg(push.ExcludeHardwareRule{Vendor: "Dell Inc.", Models: []string{"*"}})
-	if push.IsExcluded(bmc("HPE", "DL360", ""), cfg) {
+	cfg := excludeCfg(push.ExcludeHardwareRule{Vendor: testVendorDell, Models: []string{"*"}})
+	if push.IsExcluded(bmc(testVendorHPE, "DL360", ""), cfg) {
 		t.Error("different vendor: want not excluded")
 	}
 }
 
 func TestIsExcluded_wildcardModel(t *testing.T) {
-	cfg := excludeCfg(push.ExcludeHardwareRule{Vendor: "HPE", Models: []string{"*"}})
-	if !push.IsExcluded(bmc("HPE", "DL360 Gen10", ""), cfg) {
+	cfg := excludeCfg(push.ExcludeHardwareRule{Vendor: testVendorHPE, Models: []string{"*"}})
+	if !push.IsExcluded(bmc(testVendorHPE, "DL360 Gen10", ""), cfg) {
 		t.Error("wildcard model: want excluded")
 	}
 }
 
 func TestIsExcluded_specificModel(t *testing.T) {
-	cfg := excludeCfg(push.ExcludeHardwareRule{Vendor: "HPE", Models: []string{"ProLiant DL360 Gen10"}})
-	if !push.IsExcluded(bmc("HPE", "ProLiant DL360 Gen10", ""), cfg) {
+	cfg := excludeCfg(push.ExcludeHardwareRule{Vendor: testVendorHPE, Models: []string{"ProLiant DL360 Gen10"}})
+	if !push.IsExcluded(bmc(testVendorHPE, "ProLiant DL360 Gen10", ""), cfg) {
 		t.Error("matching model: want excluded")
 	}
-	if push.IsExcluded(bmc("HPE", "ProLiant DL380 Gen10", ""), cfg) {
+	if push.IsExcluded(bmc(testVendorHPE, "ProLiant DL380 Gen10", ""), cfg) {
 		t.Error("non-matching model: want not excluded")
 	}
 }
@@ -97,25 +97,25 @@ func TestIsExcluded_specificModel(t *testing.T) {
 func TestIsExcluded_minFirmware_oldFirmwareExcluded(t *testing.T) {
 	// Exclude HPE DL360 Gen9 only when firmware is below 2.0.0.
 	cfg := excludeCfg(push.ExcludeHardwareRule{
-		Vendor: "HPE", Models: []string{"ProLiant DL360 Gen9"}, MinFirmware: "2.0.0",
+		Vendor: testVendorHPE, Models: []string{testModelProLiantDL360}, MinFirmware: testMinFirmware,
 	})
-	if !push.IsExcluded(bmc("HPE", "ProLiant DL360 Gen9", "1.9.0"), cfg) {
+	if !push.IsExcluded(bmc(testVendorHPE, testModelProLiantDL360, "1.9.0"), cfg) {
 		t.Error("firmware 1.9.0 < 2.0.0: want excluded")
 	}
 }
 
 func TestIsExcluded_minFirmware_newFirmwareNotExcluded(t *testing.T) {
 	cfg := excludeCfg(push.ExcludeHardwareRule{
-		Vendor: "HPE", Models: []string{"ProLiant DL360 Gen9"}, MinFirmware: "2.0.0",
+		Vendor: testVendorHPE, Models: []string{testModelProLiantDL360}, MinFirmware: testMinFirmware,
 	})
-	if push.IsExcluded(bmc("HPE", "ProLiant DL360 Gen9", "2.1.0"), cfg) {
+	if push.IsExcluded(bmc(testVendorHPE, testModelProLiantDL360, "2.1.0"), cfg) {
 		t.Error("firmware 2.1.0 >= 2.0.0: want not excluded")
 	}
 }
 
 func TestIsExcluded_unknownVendor_notExcluded(t *testing.T) {
 	// Empty Manufacturer: informer hasn't populated Status yet.
-	cfg := excludeCfg(push.ExcludeHardwareRule{Vendor: "HPE", Models: []string{"*"}})
+	cfg := excludeCfg(push.ExcludeHardwareRule{Vendor: testVendorHPE, Models: []string{"*"}})
 	if push.IsExcluded(bmc("", "DL360", ""), cfg) {
 		t.Error("unknown vendor: want not excluded (let probe decide)")
 	}
@@ -130,15 +130,15 @@ func TestModeOverrideFor_nilBMC(t *testing.T) {
 }
 
 func TestModeOverrideFor_noMatch(t *testing.T) {
-	cfg := overrideCfg(push.ModeOverrideRule{Vendor: "Dell Inc.", Models: []string{"*"}, Mode: v1alpha1.TelemetryModeSSE})
-	if push.ModeOverrideFor(bmc("HPE", "DL360", ""), cfg) != nil {
+	cfg := overrideCfg(push.ModeOverrideRule{Vendor: testVendorDell, Models: []string{"*"}, Mode: v1alpha1.TelemetryModeSSE})
+	if push.ModeOverrideFor(bmc(testVendorHPE, "DL360", ""), cfg) != nil {
 		t.Error("different vendor: want nil")
 	}
 }
 
 func TestModeOverrideFor_wildcardMatch(t *testing.T) {
-	cfg := overrideCfg(push.ModeOverrideRule{Vendor: "HPE", Models: []string{"*"}, Mode: v1alpha1.TelemetryModeMetricReport})
-	rule := push.ModeOverrideFor(bmc("HPE", "DL360", ""), cfg)
+	cfg := overrideCfg(push.ModeOverrideRule{Vendor: testVendorHPE, Models: []string{"*"}, Mode: v1alpha1.TelemetryModeMetricReport})
+	rule := push.ModeOverrideFor(bmc(testVendorHPE, "DL360", ""), cfg)
 	if rule == nil {
 		t.Fatal("expected match, got nil")
 	}
@@ -149,10 +149,10 @@ func TestModeOverrideFor_wildcardMatch(t *testing.T) {
 
 func TestModeOverrideFor_firstMatchWins(t *testing.T) {
 	cfg := overrideCfg(
-		push.ModeOverrideRule{Vendor: "HPE", Models: []string{"*"}, Mode: v1alpha1.TelemetryModeMetricReport},
-		push.ModeOverrideRule{Vendor: "HPE", Models: []string{"*"}, Mode: v1alpha1.TelemetryModeSSE},
+		push.ModeOverrideRule{Vendor: testVendorHPE, Models: []string{"*"}, Mode: v1alpha1.TelemetryModeMetricReport},
+		push.ModeOverrideRule{Vendor: testVendorHPE, Models: []string{"*"}, Mode: v1alpha1.TelemetryModeSSE},
 	)
-	rule := push.ModeOverrideFor(bmc("HPE", "DL360", ""), cfg)
+	rule := push.ModeOverrideFor(bmc(testVendorHPE, "DL360", ""), cfg)
 	if rule == nil || rule.Mode != v1alpha1.TelemetryModeMetricReport {
 		t.Errorf("first match should win: got %v", rule)
 	}

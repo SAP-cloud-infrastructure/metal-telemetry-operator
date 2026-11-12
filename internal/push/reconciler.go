@@ -135,19 +135,20 @@ func (r *SubscriptionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	if bt.Status.Mode != telemetryv1alpha1.TelemetryModeMetricReport {
-		if err := r.deleteSubscriptions(ctx, log, bmc); err != nil {
+		if err := r.deleteSubscriptions(ctx, bmc); err != nil {
 			log.Error(err, "Failed to delete push subscriptions (best-effort)")
 		}
 		return ctrl.Result{}, nil
 	}
 
-	if err := r.ensureSubscriptions(ctx, log, bmc); err != nil {
+	if err := r.ensureSubscriptions(ctx, bmc); err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensure push subscriptions for %q: %w", req.Name, err)
 	}
 	return ctrl.Result{}, nil
 }
 
-func (r *SubscriptionReconciler) ensureSubscriptions(ctx context.Context, log logr.Logger, bmc *metalv1alpha1.BMC) error {
+func (r *SubscriptionReconciler) ensureSubscriptions(ctx context.Context, bmc *metalv1alpha1.BMC) error {
+	log := r.log.WithValues("bmc", bmc.Name)
 	username, password, err := r.fetchCredentials(ctx, bmc)
 	if err != nil {
 		return err
@@ -210,7 +211,8 @@ func (r *SubscriptionReconciler) ensureSubscriptions(ctx context.Context, log lo
 
 // deleteSubscriptions removes all our push subscriptions from the BMC.
 // Best-effort: errors are logged but not returned.
-func (r *SubscriptionReconciler) deleteSubscriptions(ctx context.Context, log logr.Logger, bmc *metalv1alpha1.BMC) error {
+func (r *SubscriptionReconciler) deleteSubscriptions(ctx context.Context, bmc *metalv1alpha1.BMC) error {
+	log := r.log.WithValues("bmc", bmc.Name)
 	username, password, err := r.fetchCredentials(ctx, bmc)
 	if err != nil {
 		return nil // can't fetch creds — best-effort, nothing to clean up
@@ -383,7 +385,7 @@ func (c *redfishClient) CreateEventSubscription(ctx context.Context, destination
 	if err != nil {
 		return "", fmt.Errorf("POST Subscriptions: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	respBody, _ := io.ReadAll(resp.Body)
 
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
@@ -415,7 +417,7 @@ func (c *redfishClient) DeleteEventSubscription(ctx context.Context, uri string)
 	if err != nil {
 		return fmt.Errorf("DELETE %q: %w", uri, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	_, _ = io.Copy(io.Discard, resp.Body)
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
@@ -435,7 +437,7 @@ func (c *redfishClient) get(ctx context.Context, path string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("GET %q: %w", path, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		b, _ := io.ReadAll(resp.Body)

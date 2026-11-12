@@ -148,7 +148,9 @@ func (r *Receiver) Start(ctx context.Context) error {
 			return fmt.Errorf("push receiver Shutdown: %w", err)
 		}
 		r.log.Info("Push receiver stopped")
-		<-errCh
+		if err := <-errCh; err != nil {
+			return fmt.Errorf("push receiver goroutine: %w", err)
+		}
 		return nil
 	case err := <-errCh:
 		return err

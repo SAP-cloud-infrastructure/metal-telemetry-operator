@@ -45,13 +45,13 @@ excludeHardware:
 		t.Fatalf("got %d excludeHardware rows, want 1", len(cfg.ExcludeHardware))
 	}
 	rule := cfg.ExcludeHardware[0]
-	if rule.Vendor != "HPE" {
+	if rule.Vendor != testVendorHPE {
 		t.Errorf("got vendor %q, want HPE", rule.Vendor)
 	}
-	if len(rule.Models) != 1 || rule.Models[0] != "ProLiant DL360 Gen9" {
+	if len(rule.Models) != 1 || rule.Models[0] != testModelProLiantDL360 {
 		t.Errorf("unexpected models: %v", rule.Models)
 	}
-	if rule.MinFirmware != "2.0.0" {
+	if rule.MinFirmware != testMinFirmware {
 		t.Errorf("got minFirmware %q, want 2.0.0", rule.MinFirmware)
 	}
 }
