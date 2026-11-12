@@ -50,6 +50,9 @@ func main() {
 	var pushSubscriberID string
 	var pushConfigName string
 	var pushConfigNamespace string
+	var pushEnableCriticalEventHandler bool
+	var pushEnableWarningEventHandler bool
+	var pushInsecureTLS bool
 	tlsOpts := make([]func(*tls.Config), 0, 1)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metrics endpoint binds to.")
@@ -72,6 +75,12 @@ func main() {
 		"Name of the ConfigMap holding push mode overrides and exclusion rules.")
 	flag.StringVar(&pushConfigNamespace, "push-config-namespace", "",
 		"Namespace of the push config ConfigMap.")
+	flag.BoolVar(&pushEnableCriticalEventHandler, "enable-critical-event-handler", true,
+		"Set CriticalEventReceived condition on Server objects when a Critical Redfish alert arrives.")
+	flag.BoolVar(&pushEnableWarningEventHandler, "enable-warning-event-handler", true,
+		"Emit Kubernetes Events for Warning-severity Redfish alerts.")
+	flag.BoolVar(&pushInsecureTLS, "push-insecure-tls", false,
+		"Skip TLS certificate verification when connecting to BMCs for push subscriptions.")
 
 	// Disable HTTP/2 to avoid stream cancellation CVEs.
 	disableHTTP2 := func(c *tls.Config) {
@@ -132,11 +141,15 @@ func main() {
 
 	if pushEventsAddr != "" && pushReceiverURL != "" {
 		if err := push.AddTo(mgr, &push.Options{
-			ReceiverURL:     pushReceiverURL,
-			EventsAddr:      pushEventsAddr,
-			SubscriberID:    pushSubscriberID,
-			ConfigName:      pushConfigName,
-			ConfigNamespace: pushConfigNamespace,
+			ReceiverURL:                pushReceiverURL,
+			EventsAddr:                 pushEventsAddr,
+			SubscriberID:               pushSubscriberID,
+			ConfigName:                 pushConfigName,
+			ConfigNamespace:            pushConfigNamespace,
+			EnableCriticalEventHandler: pushEnableCriticalEventHandler,
+			EnableWarningEventHandler:  pushEnableWarningEventHandler,
+			InsecureTLS:                pushInsecureTLS,
+			ConfigLoader:               pushLoader,
 		}); err != nil {
 			setupLog.Error(err, "Failed to set up push pipeline")
 			os.Exit(1)

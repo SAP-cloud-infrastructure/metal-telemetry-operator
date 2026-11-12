@@ -30,8 +30,17 @@ import (
 // BMCReconciler reconciles metal-operator BMC resources and manages SSE telemetry connections.
 // +kubebuilder:rbac:groups=metal.ironcore.dev,resources=bmcs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=metal.ironcore.dev,resources=bmcsecrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=metal.ironcore.dev,resources=servers,verbs=get;list;watch
+// +kubebuilder:rbac:groups=metal.ironcore.dev,resources=servers/status,verbs=get;patch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 // +kubebuilder:rbac:groups=telemetry.metal.ironcore.dev,resources=bmctelemetries,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=telemetry.metal.ironcore.dev,resources=bmctelemetries/status,verbs=get;update;patch
+
+// unsupportedReprobeInterval is how often a BMC whose EventService probe returned
+// Unsupported is re-probed. EventService configuration rarely changes, so 30 minutes
+// avoids hammering BMCs while still catching late-enabling firmware.
+const unsupportedReprobeInterval = 30 * time.Minute
+
 type BMCReconciler struct {
 	client.Client
 	Scheme                *runtime.Scheme
@@ -166,6 +175,9 @@ func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		}
 		if mode != telemetryv1alpha1.TelemetryModeUnsupported && r.EnqueuePushBMC != nil {
 			r.EnqueuePushBMC(bmc.Name)
+		}
+		if mode == telemetryv1alpha1.TelemetryModeUnsupported {
+			return ctrl.Result{RequeueAfter: unsupportedReprobeInterval}, nil
 		}
 		return ctrl.Result{}, nil
 	}

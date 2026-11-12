@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"sync/atomic"
+	"time"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
@@ -41,6 +42,18 @@ type Config struct {
 	// ModeOverrides maps vendor/model patterns to a forced TelemetryMode,
 	// overriding auto-detection for matching BMCs.
 	ModeOverrides []ModeOverrideRule `yaml:"modeOverrides,omitempty"`
+
+	// AlertmanagerURL is optional. When set, Critical Redfish events are
+	// forwarded to Alertmanager's /api/v2/alerts endpoint.
+	AlertmanagerURL string `yaml:"alertmanagerURL,omitempty"`
+
+	// TestEventInterval is the cadence for pipeline health-check SubmitTestEvent
+	// calls. 0 or absent disables health checks.
+	TestEventInterval time.Duration `yaml:"testEventInterval,omitempty"`
+
+	// TestEventTimeout caps how long we wait for a test event round-trip.
+	// Defaults to 30s when unset.
+	TestEventTimeout time.Duration `yaml:"testEventTimeout,omitempty"`
 }
 
 // ExcludeHardwareRule opts a vendor/model combination out of telemetry collection.
@@ -96,6 +109,12 @@ type ConfigLoader struct {
 // has been loaded yet.
 func (l *ConfigLoader) Config() *Config {
 	return l.current.Load()
+}
+
+// StoreConfig stores cfg as the current config. Intended for tests that need
+// a ConfigLoader with a pre-set value without starting a cache watch.
+func (l *ConfigLoader) StoreConfig(cfg *Config) {
+	l.current.Store(cfg)
 }
 
 // Start installs the watch and blocks until ctx is cancelled.

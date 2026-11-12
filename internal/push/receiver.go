@@ -24,10 +24,25 @@ const (
 	maxBodyBytes    = 1 << 20 // 1 MB
 	shutdownTimeout = 5 * time.Second
 	pathPrefix      = "/serverevents/"
+	// maxConcurrentFetches bounds the number of simultaneous GET-on-empty goroutines.
+	maxConcurrentFetches = 10
 )
 
+// MetricFetcher fetches a full MetricReport body via authenticated GET.
+// Called when a POST notification arrives with empty MetricValues but a
+// non-empty @odata.id (Dell 17G iDRAC 10 behaviour). Nil disables the path.
+type MetricFetcher interface {
+	FetchMetricReport(ctx context.Context, bmcName, odataID string) ([]byte, error)
+}
+
+// TestEventNotifier is notified when an alert event arrives at the receiver.
+// The subscription reconciler implements this to correlate SubmitTestEvent
+// round-trips by matching the messageId it sent with what arrives here.
+type TestEventNotifier interface {
+	NotifyTestEvent(bmcName, messageId string)
+}
+
 // StatusWriter is called by the receiver to report push-pipeline events.
-// Implemented by the subscription reconciler or a status-update wrapper.
 type StatusWriter interface {
 	// RecordMetricReport marks the BMC as connected and updates LastEventTime.
 	RecordMetricReport(ctx context.Context, bmcName string)
@@ -42,12 +57,19 @@ type ReceiverConfig struct {
 	SubscriberID string
 	// Sink receives decoded MetricReport samples. Required.
 	Sink sink.MetricReportSink
+	// EventSink receives decoded Redfish alert events. Optional; when nil the
+	// alerts route still handles ResourceRemoved but does not count events.
+	EventSink sink.EventSink
+	// MetricFetcher is called when a MetricReport POST arrives with empty
+	// MetricValues but a non-empty @odata.id. Nil disables GET-on-empty.
+	MetricFetcher MetricFetcher
+	// TestNotifier is called for every incoming alert event so the subscription
+	// reconciler can correlate SubmitTestEvent round-trips. May be nil.
+	TestNotifier TestEventNotifier
 	// StatusWriter is notified when a MetricReport POST arrives. May be nil.
 	StatusWriter StatusWriter
 	// OnResourceRemoved is called when an alert event indicates that a push
-	// subscription was deleted on the BMC side (ResourceRemoved). The
-	// subscription reconciler sets this to enqueue a fast re-subscribe.
-	// May be nil.
+	// subscription was deleted on the BMC side (ResourceRemoved). May be nil.
 	OnResourceRemoved func(bmcName string)
 	Log               logr.Logger
 }
@@ -61,6 +83,7 @@ type Receiver struct {
 	log         logr.Logger
 	alertsPath  string
 	metricsPath string
+	fetchSem    chan struct{}
 }
 
 var (
@@ -69,8 +92,6 @@ var (
 )
 
 // NeedLeaderElection returns false so every pod binds the receive port.
-// Without this the controller-runtime default puts the Receiver in the
-// leader-only group and non-leader pods silently drop BMC POSTs.
 func (r *Receiver) NeedLeaderElection() bool { return false }
 
 // NewReceiver constructs a Receiver. Returns an error if Addr or Sink is unset.
@@ -90,6 +111,7 @@ func NewReceiver(cfg ReceiverConfig) (*Receiver, error) {
 		log:         log,
 		alertsPath:  alertsPathFor(cfg.SubscriberID),
 		metricsPath: metricsPathFor(cfg.SubscriberID),
+		fetchSem:    make(chan struct{}, maxConcurrentFetches),
 	}
 	r.buildMux()
 	r.srv = &http.Server{
@@ -117,7 +139,6 @@ func (r *Receiver) buildMux() {
 func (r *Receiver) Handler() http.Handler { return r.mux }
 
 // SetOnResourceRemoved wires the ResourceRemoved callback after construction.
-// Called by the push reconciler once it is set up.
 func (r *Receiver) SetOnResourceRemoved(fn func(bmcName string)) {
 	r.cfg.OnResourceRemoved = fn
 }
@@ -127,8 +148,12 @@ func (r *Receiver) SetStatusWriter(sw StatusWriter) {
 	r.cfg.StatusWriter = sw
 }
 
+// SetTestNotifier wires a TestEventNotifier after construction.
+func (r *Receiver) SetTestNotifier(n TestEventNotifier) {
+	r.cfg.TestNotifier = n
+}
+
 // Start listens on cfg.Addr and serves until ctx is cancelled.
-// Implements manager.Runnable.
 func (r *Receiver) Start(ctx context.Context) error {
 	r.log.Info("Started push receiver", "addr", r.cfg.Addr)
 	errCh := make(chan error, 1)
@@ -148,9 +173,7 @@ func (r *Receiver) Start(ctx context.Context) error {
 			return fmt.Errorf("push receiver Shutdown: %w", err)
 		}
 		r.log.Info("Push receiver stopped")
-		if err := <-errCh; err != nil {
-			return fmt.Errorf("push receiver goroutine: %w", err)
-		}
+		<-errCh //nolint:errcheck // always nil after ErrServerClosed
 		return nil
 	case err := <-errCh:
 		return err
@@ -174,10 +197,55 @@ func (r *Receiver) handleMetricReport(w http.ResponseWriter, req *http.Request) 
 	}
 	r.log.V(2).Info("Received MetricReport POST", "bmc", bmcName, "bytes", len(body))
 
+	// Peek at @odata.type: an Event payload arriving on the metrics endpoint
+	// means the subscription was created with wrong EventTypes. Log and return
+	// 200 so the BMC does not retry; the subscription reconciler will self-heal.
+	var peek struct {
+		ODataType string `json:"@odata.type"`
+		ODataID   string `json:"@odata.id"`
+	}
+	if err := json.Unmarshal(body, &peek); err == nil && strings.HasPrefix(peek.ODataType, "#Event.") {
+		r.log.Info("MetricReport endpoint received sensor Event payload — subscription has wrong EventTypes, will self-heal",
+			"bmc", bmcName, "odataType", peek.ODataType)
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
 	samples, err := sse.ParseMetricReport(body)
 	if err != nil {
 		r.log.V(1).Info("Failed to parse MetricReport payload", "bmc", bmcName, "err", err.Error())
 		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		return
+	}
+
+	// GET-on-empty: Dell 17G sends a notification with no MetricValues but
+	// a non-empty @odata.id pointing at the full report. Fetch it async.
+	if len(samples) == 0 && peek.ODataID != "" && r.cfg.MetricFetcher != nil {
+		w.WriteHeader(http.StatusOK)
+		select {
+		case r.fetchSem <- struct{}{}:
+		default:
+			r.log.V(1).Info("GET-on-empty skipped: too many in-flight fetches", "bmc", bmcName)
+			return
+		}
+		go func() {
+			defer func() { <-r.fetchSem }()
+			ctx := context.WithoutCancel(req.Context())
+			fetched, err := r.cfg.MetricFetcher.FetchMetricReport(ctx, bmcName, peek.ODataID)
+			if err != nil {
+				r.log.Error(err, "GET-on-empty fetch failed", "bmc", bmcName, "odataID", peek.ODataID)
+				return
+			}
+			s, err := sse.ParseMetricReport(fetched)
+			if err != nil {
+				r.log.V(1).Info("Failed to parse fetched MetricReport", "bmc", bmcName, "err", err.Error())
+				return
+			}
+			if err := r.cfg.Sink.PublishSamples(ctx, bmcName, s); err != nil {
+				r.log.Error(err, "MetricReport sink publish failed (async)", "bmc", bmcName)
+			}
+			r.log.V(2).Info("Published MetricReport samples (async GET-on-empty)", "bmc", bmcName, "count", len(s))
+		}()
 		return
 	}
 
@@ -196,11 +264,80 @@ func (r *Receiver) handleMetricReport(w http.ResponseWriter, req *http.Request) 
 	w.WriteHeader(http.StatusOK)
 }
 
-// alertEvent is the minimal Redfish alert event we decode to detect ResourceRemoved.
-type alertEvent struct {
-	Events []struct {
-		MessageID string `json:"MessageId"`
-	} `json:"Events"`
+// eventEnvelope accepts both vendor variants of the SEL push payload:
+// some BMCs put events under "Events", others under "Alerts".
+type eventEnvelope struct {
+	Events []wireEvent `json:"Events,omitempty"`
+	Alerts []wireEvent `json:"Alerts,omitempty"`
+}
+
+func (e eventEnvelope) flatten() []sink.Event {
+	src := e.Events
+	if len(src) == 0 {
+		src = e.Alerts
+	}
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([]sink.Event, 0, len(src))
+	for i := range src {
+		out = append(out, src[i].toEvent())
+	}
+	return out
+}
+
+// wireEvent is the on-wire Redfish event shape. Both deprecated (Redfish
+// pre-v1.5) and current field names are accepted.
+type wireEvent struct {
+	EventID         string               `json:"EventId"`
+	MessageID       string               `json:"MessageId"`
+	Message         string               `json:"Message"`
+	Severity        string               `json:"Severity"`        // deprecated since Redfish v1.5
+	MessageSeverity string               `json:"MessageSeverity"` // preferred since Redfish v1.5
+	EventTimestamp  string               `json:"EventTimestamp"`
+	Origin          originOfConditionRef `json:"OriginOfCondition"`
+}
+
+type originOfConditionRef struct {
+	ODataID string
+}
+
+// UnmarshalJSON tries the spec object form first, then falls back to a plain
+// string. Both shapes resolve to the same ODataID field.
+func (o *originOfConditionRef) UnmarshalJSON(data []byte) error {
+	var ref struct {
+		ODataID string `json:"@odata.id"`
+	}
+	if err := json.Unmarshal(data, &ref); err == nil {
+		o.ODataID = ref.ODataID
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	o.ODataID = s
+	return nil
+}
+
+func (e wireEvent) toEvent() sink.Event {
+	out := sink.Event{
+		Message:           e.Message,
+		MessageID:         e.MessageID,
+		EventTimestamp:    e.EventTimestamp,
+		OriginOfCondition: e.Origin.ODataID,
+	}
+	if e.MessageSeverity != "" {
+		out.Severity = e.MessageSeverity
+	} else {
+		out.Severity = e.Severity
+	}
+	if e.EventID != "" {
+		out.EventID = e.EventID
+	} else {
+		out.EventID = e.MessageID
+	}
+	return out
 }
 
 func (r *Receiver) handleAlerts(w http.ResponseWriter, req *http.Request) {
@@ -220,34 +357,50 @@ func (r *Receiver) handleAlerts(w http.ResponseWriter, req *http.Request) {
 	}
 	r.log.V(2).Info("Received alert POST", "bmc", bmcName, "bytes", len(body))
 
-	var env alertEvent
+	var env eventEnvelope
 	if err := json.Unmarshal(body, &env); err != nil {
 		r.log.V(1).Info("Failed to parse alert payload", "bmc", bmcName, "err", err.Error())
-	} else {
-		for _, ev := range env.Events {
-			if isResourceRemoved(ev.MessageID) {
-				r.log.Info("ResourceRemoved event detected, triggering re-subscribe", "bmc", bmcName)
-				if r.cfg.OnResourceRemoved != nil {
-					r.cfg.OnResourceRemoved(bmcName)
-				}
-				break
+		// Still return 200 to prevent the BMC from retrying a malformed payload.
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	events := env.flatten()
+
+	// Check for ResourceRemoved before publishing to the sink — this event
+	// has no actionable severity so the sink would filter it out anyway.
+	for _, ev := range events {
+		if isResourceRemoved(ev.MessageID) {
+			r.log.Info("ResourceRemoved event detected, triggering re-subscribe", "bmc", bmcName)
+			if r.cfg.OnResourceRemoved != nil {
+				r.cfg.OnResourceRemoved(bmcName)
+			}
+			break
+		}
+	}
+
+	if r.cfg.EventSink != nil && len(events) > 0 {
+		if err := r.cfg.EventSink.PublishEvents(req.Context(), bmcName, events); err != nil {
+			r.log.Error(err, "Event sink publish failed", "bmc", bmcName)
+		}
+	}
+
+	if r.cfg.TestNotifier != nil {
+		for i := range events {
+			if events[i].MessageID != "" {
+				r.cfg.TestNotifier.NotifyTestEvent(bmcName, events[i].MessageID)
 			}
 		}
 	}
+
 	// Always return 200 to prevent the BMC from retrying.
 	w.WriteHeader(http.StatusOK)
 }
 
-// isResourceRemoved reports whether a Redfish MessageId indicates that a
-// subscription resource was removed on the BMC side.
-// HPE iLO uses "ResourceEvent.1.0.ResourceRemoved" when TerminateAfterRetries
-// kills a subscription.
 func isResourceRemoved(messageID string) bool {
 	return strings.Contains(messageID, "ResourceRemoved")
 }
 
-// bmcNameFrom extracts the last URL path segment after prefix, returning ""
-// if the segment is missing, empty, or contains a slash.
 func bmcNameFrom(urlPath, prefix string) string {
 	if !strings.HasPrefix(urlPath, prefix) {
 		return ""

@@ -4,29 +4,37 @@
 package push
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
+	"github.com/ironcore-dev/controller-utils/clientutils"
 	metalv1alpha1 "github.com/ironcore-dev/metal-operator/api/v1alpha1"
+	metalbmc "github.com/ironcore-dev/metal-operator/bmc"
+	"github.com/stmcginnis/gofish"
+	redfishschemas "github.com/stmcginnis/gofish/schemas"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	telemetryv1alpha1 "github.com/SAP-cloud-infrastructure/metal-telemetry-operator/api/v1alpha1"
+	"github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/sink"
 )
+
+const bmcSubscriptionFinalizer = "telemetry.metal.ironcore.dev/push-subscriptions"
 
 // Subscription holds the fields of a Redfish EventDestination that we need to
 // classify and manage.
@@ -36,29 +44,45 @@ type Subscription struct {
 	EventFormat string
 }
 
+// EventServiceCapabilities holds the result of a live EventService probe.
+type EventServiceCapabilities struct {
+	ServiceEnabled   bool
+	HasSubscriptions bool
+}
+
 // Client is the minimal Redfish interface the subscription reconciler uses.
 type Client interface {
-	CreateEventSubscription(ctx context.Context, destination, eventFormatType string) (string, error)
+	CreateEventSubscription(ctx context.Context, destination string, eventType redfishschemas.EventFormatType, policy redfishschemas.DeliveryRetryPolicy) (string, error)
 	DeleteEventSubscription(ctx context.Context, uri string) error
 	ListEventSubscriptions(ctx context.Context) ([]Subscription, error)
-	Close()
+	ProbeEventService(ctx context.Context) (*EventServiceCapabilities, error)
+	SubmitTestEvent(ctx context.Context, msgID string) error
+	Logout()
 }
 
 // ClientFactory creates Redfish clients for a given BMC.
 type ClientFactory interface {
-	NewClient(ctx context.Context, host, username, password string) (Client, error)
+	NewClient(ctx context.Context, host, username, password string, insecureTLS bool) (Client, error)
 }
 
 // ReconcilerConfig holds all parameters for constructing a SubscriptionReconciler.
 type ReconcilerConfig struct {
 	// ReceiverURL is the base URL the BMCs POST MetricReports to.
-	// Example: "http://10.0.0.5:9093"
 	ReceiverURL string
 	// SubscriberID scopes subscription destination paths. May be empty.
 	SubscriberID string
-	// Factory creates Redfish clients; defaults to the production HTTPS client.
+	// InsecureTLS skips TLS certificate verification when connecting to BMCs.
+	InsecureTLS bool
+	// Factory creates Redfish clients; defaults to the production gofish client.
 	Factory ClientFactory
-	Log     logr.Logger
+	// Sink is called with Forget on BMC deletion to release per-BMC event sink state. Optional.
+	Sink sink.EventSink
+	// AlertHandler is called with Forget on BMC deletion. Optional.
+	AlertHandler interface{ Forget(hostname string) }
+	// ConfigLoader provides live-reloaded push config used for test event
+	// interval/timeout. Optional; when nil test events are disabled.
+	ConfigLoader *ConfigLoader
+	Log          logr.Logger
 }
 
 // SubscriptionReconciler watches BMC objects and maintains MetricReport push
@@ -68,6 +92,16 @@ type SubscriptionReconciler struct {
 	cfg      ReconcilerConfig
 	log      logr.Logger
 	eventsCh chan event.TypedGenericEvent[*metalv1alpha1.BMC]
+
+	srvURL *url.URL
+
+	testPending  sync.Map // bmcName → testEntry
+	lastTestTime sync.Map // bmcName → time.Time
+}
+
+type testEntry struct {
+	deadline time.Time
+	msgID    string
 }
 
 // NewSubscriptionReconciler constructs a SubscriptionReconciler ready for
@@ -80,11 +114,19 @@ func NewSubscriptionReconciler(c client.Client, cfg ReconcilerConfig) *Subscript
 	if cfg.Factory == nil {
 		cfg.Factory = &defaultClientFactory{}
 	}
-	return &SubscriptionReconciler{
+	r := &SubscriptionReconciler{
 		Client: c,
 		cfg:    cfg,
 		log:    log,
 	}
+	// Parse ReceiverURL eagerly so tests that call Reconcile directly without
+	// SetupWithManager still get a valid srvURL.
+	if cfg.ReceiverURL != "" {
+		if u, err := url.Parse(cfg.ReceiverURL); err == nil && u.Scheme != "" && u.Host != "" {
+			r.srvURL = u
+		}
+	}
+	return r
 }
 
 // EnqueueBMC enqueues a reconcile for the named BMC without waiting for the
@@ -104,6 +146,15 @@ func (r *SubscriptionReconciler) EnqueueBMC(name string) {
 
 // SetupWithManager registers the reconciler with the manager.
 func (r *SubscriptionReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	u, err := url.Parse(r.cfg.ReceiverURL)
+	if err != nil {
+		return fmt.Errorf("push reconciler: parse ReceiverURL %q: %w", r.cfg.ReceiverURL, err)
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return fmt.Errorf("push reconciler: ReceiverURL must be absolute (got %q)", r.cfg.ReceiverURL)
+	}
+	r.srvURL = u
+
 	r.eventsCh = make(chan event.TypedGenericEvent[*metalv1alpha1.BMC], 64)
 	return ctrl.NewControllerManagedBy(mgr).
 		Named("push-subscription").
@@ -120,123 +171,182 @@ func (r *SubscriptionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	bmc := &metalv1alpha1.BMC{}
 	if err := r.Get(ctx, req.NamespacedName, bmc); err != nil {
 		if apierrors.IsNotFound(err) {
+			r.tearDownOne(ctx, req.Name)
+			r.forgetSinks(req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("get BMC %q: %w", req.Name, err)
 	}
 
+	// BMC being deleted: tear down subscriptions while endpoint + credentials
+	// are still resolvable via the still-live object, then release the finalizer.
+	if !bmc.DeletionTimestamp.IsZero() {
+		if !controllerutil.ContainsFinalizer(bmc, bmcSubscriptionFinalizer) {
+			return ctrl.Result{}, nil
+		}
+		r.tearDownOne(ctx, req.Name)
+		r.forgetSinks(req.Name)
+		if err := clientutils.PatchRemoveFinalizer(ctx, r.Client, bmc, bmcSubscriptionFinalizer); err != nil {
+			return ctrl.Result{}, fmt.Errorf("remove finalizer on BMC %q: %w", req.Name, err)
+		}
+		return ctrl.Result{}, nil
+	}
+
 	bt := &telemetryv1alpha1.BMCTelemetry{}
 	if err := r.Get(ctx, types.NamespacedName{Name: req.Name}, bt); err != nil {
 		if apierrors.IsNotFound(err) {
-			// BMCTelemetry not yet created by the bmc_reconciler; wait.
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, fmt.Errorf("get BMCTelemetry %q: %w", req.Name, err)
 	}
 
 	if bt.Status.Mode != telemetryv1alpha1.TelemetryModeMetricReport {
-		if err := r.deleteSubscriptions(ctx, bmc); err != nil {
+		if err := r.deleteAllSubscriptions(ctx, bmc); err != nil {
 			log.Error(err, "Failed to delete push subscriptions (best-effort)")
+		}
+		if controllerutil.ContainsFinalizer(bmc, bmcSubscriptionFinalizer) {
+			if err := clientutils.PatchRemoveFinalizer(ctx, r.Client, bmc, bmcSubscriptionFinalizer); err != nil {
+				log.Error(err, "Failed to remove stale finalizer")
+			}
 		}
 		return ctrl.Result{}, nil
 	}
 
-	if err := r.ensureSubscriptions(ctx, bmc); err != nil {
+	requeue, err := r.ensureSubscriptions(ctx, bmc)
+	if err != nil {
 		return ctrl.Result{}, fmt.Errorf("ensure push subscriptions for %q: %w", req.Name, err)
+	}
+	if requeue > 0 {
+		return ctrl.Result{RequeueAfter: requeue}, nil
 	}
 	return ctrl.Result{}, nil
 }
 
-func (r *SubscriptionReconciler) ensureSubscriptions(ctx context.Context, bmc *metalv1alpha1.BMC) error {
-	log := r.log.WithValues("bmc", bmc.Name)
+func (r *SubscriptionReconciler) buildClient(ctx context.Context, bmc *metalv1alpha1.BMC) (Client, error) {
 	username, password, err := r.fetchCredentials(ctx, bmc)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	ip := bmc.Status.IP.String()
 	if ip == "" || ip == "<nil>" {
-		log.Info("BMC has no IP yet, skipping subscription ensure")
-		return nil
+		return nil, fmt.Errorf("BMC has no IP")
 	}
+	return r.cfg.Factory.NewClient(ctx, ip, username, password, r.cfg.InsecureTLS)
+}
 
-	rc, err := r.cfg.Factory.NewClient(ctx, ip, username, password)
+func (r *SubscriptionReconciler) ensureSubscriptions(ctx context.Context, bmc *metalv1alpha1.BMC) (time.Duration, error) {
+	log := r.log.WithValues("bmc", bmc.Name)
+	c, err := r.buildClient(ctx, bmc)
 	if err != nil {
-		return fmt.Errorf("create Redfish client: %w", err)
+		log.Info("Cannot build BMC client for subscription ensure", "err", err.Error())
+		return 0, nil // best-effort
 	}
-	defer rc.Close()
+	defer c.Logout()
 
-	subs, err := rc.ListEventSubscriptions(ctx)
+	subs, err := c.ListEventSubscriptions(ctx)
 	if err != nil {
-		return fmt.Errorf("list subscriptions: %w", err)
+		return 0, fmt.Errorf("list subscriptions: %w", err)
 	}
 
 	current, stale := r.classify(subs, bmc.Name)
 
 	for _, s := range stale {
-		if delErr := rc.DeleteEventSubscription(ctx, s.URI); delErr != nil {
+		if delErr := c.DeleteEventSubscription(ctx, s.URI); delErr != nil {
 			log.Error(delErr, "Failed to delete stale subscription", "uri", s.URI)
 		} else {
 			log.Info("Deleted stale push subscription", "uri", s.URI)
 		}
 	}
 
-	hasMetrics, hasAlerts := false, false
-	for _, s := range current {
-		if strings.Contains(s.Destination, "/metricsreport/") {
-			hasMetrics = true
+	metrics, alerts := groupByFormat(current)
+
+	if keep, extras := pickAndExtras(metrics); len(extras) > 0 {
+		log.V(1).Info("Deduplicating metric subscriptions", "keep", keep.URI, "removed", len(extras))
+		for _, s := range extras {
+			_ = c.DeleteEventSubscription(ctx, s.URI)
 		}
-		if strings.Contains(s.Destination, "/alerts/") {
-			hasAlerts = true
+	}
+	if keep, extras := pickAndExtras(alerts); len(extras) > 0 {
+		log.V(1).Info("Deduplicating alert subscriptions", "keep", keep.URI, "removed", len(extras))
+		for _, s := range extras {
+			_ = c.DeleteEventSubscription(ctx, s.URI)
 		}
 	}
 
-	if !hasMetrics {
+	// Ensure the finalizer before any Create so a crash after Create but
+	// before finalizer write doesn't orphan the subscription.
+	if _, err := clientutils.PatchEnsureFinalizer(ctx, r.Client, bmc, bmcSubscriptionFinalizer); err != nil {
+		return 0, fmt.Errorf("ensure finalizer: %w", err)
+	}
+
+	if len(metrics) == 0 {
 		dest := r.destinationFor("metricsreport", bmc.Name)
-		uri, err := rc.CreateEventSubscription(ctx, dest, "MetricReport")
+		uri, err := c.CreateEventSubscription(ctx, dest,
+			redfishschemas.MetricReportEventFormatType,
+			redfishschemas.RetryForeverDeliveryRetryPolicy)
 		if err != nil {
-			return fmt.Errorf("create MetricReport subscription: %w", err)
+			return 0, fmt.Errorf("create MetricReport subscription: %w", err)
 		}
 		log.Info("Created MetricReport push subscription", "uri", uri)
 	}
-	if !hasAlerts {
+	if len(alerts) == 0 {
 		dest := r.destinationFor("alerts", bmc.Name)
-		uri, err := rc.CreateEventSubscription(ctx, dest, "Event")
+		uri, err := c.CreateEventSubscription(ctx, dest,
+			redfishschemas.EventEventFormatType,
+			redfishschemas.RetryForeverDeliveryRetryPolicy)
 		if err != nil {
-			return fmt.Errorf("create alerts subscription: %w", err)
+			return 0, fmt.Errorf("create alerts subscription: %w", err)
 		}
 		log.Info("Created alerts push subscription", "uri", uri)
 	}
-	return nil
+	requeue := r.sendTestEvent(ctx, bmc, c)
+	return requeue, nil
 }
 
-// deleteSubscriptions removes all our push subscriptions from the BMC.
-// Best-effort: errors are logged but not returned.
-func (r *SubscriptionReconciler) deleteSubscriptions(ctx context.Context, bmc *metalv1alpha1.BMC) error {
+func groupByFormat(subs []Subscription) (metrics, alerts []Subscription) {
+	for _, sub := range subs {
+		switch sub.EventFormat {
+		case string(redfishschemas.MetricReportEventFormatType):
+			metrics = append(metrics, sub)
+		case string(redfishschemas.EventEventFormatType):
+			alerts = append(alerts, sub)
+		}
+	}
+	return
+}
+
+func pickAndExtras(subs []Subscription) (keep Subscription, extras []Subscription) {
+	if len(subs) == 0 {
+		return Subscription{}, nil
+	}
+	keep = subs[0]
+	for _, s := range subs[1:] {
+		if s.URI < keep.URI {
+			extras = append(extras, keep)
+			keep = s
+		} else {
+			extras = append(extras, s)
+		}
+	}
+	return keep, extras
+}
+
+func (r *SubscriptionReconciler) deleteAllSubscriptions(ctx context.Context, bmc *metalv1alpha1.BMC) error {
 	log := r.log.WithValues("bmc", bmc.Name)
-	username, password, err := r.fetchCredentials(ctx, bmc)
+	c, err := r.buildClient(ctx, bmc)
 	if err != nil {
-		return nil // can't fetch creds — best-effort, nothing to clean up
+		return nil // best-effort: can't connect, nothing to clean up
 	}
-	ip := bmc.Status.IP.String()
-	if ip == "" || ip == "<nil>" {
-		return nil
-	}
+	defer c.Logout()
 
-	rc, err := r.cfg.Factory.NewClient(ctx, ip, username, password)
-	if err != nil {
-		return nil // best-effort
-	}
-	defer rc.Close()
-
-	subs, err := rc.ListEventSubscriptions(ctx)
+	subs, err := c.ListEventSubscriptions(ctx)
 	if err != nil {
 		return nil // best-effort
 	}
 
 	current, stale := r.classify(subs, bmc.Name)
-	all := append(current, stale...)
-	for _, s := range all {
-		if delErr := rc.DeleteEventSubscription(ctx, s.URI); delErr != nil {
+	for _, s := range append(current, stale...) {
+		if delErr := c.DeleteEventSubscription(ctx, s.URI); delErr != nil {
 			log.Error(delErr, "Failed to delete push subscription", "uri", s.URI)
 		} else {
 			log.Info("Deleted push subscription", "uri", s.URI)
@@ -245,35 +355,82 @@ func (r *SubscriptionReconciler) deleteSubscriptions(ctx context.Context, bmc *m
 	return nil
 }
 
-// classify partitions subscriptions into:
-//   - current: ours AND destination host matches ReceiverURL
-//   - stale:   ours AND destination host differs (leftover from old instance)
-//
-// A subscription is "ours" when its Destination contains our scoped path for
-// this BMC (metricsreport or alerts).
-func (r *SubscriptionReconciler) classify(subs []Subscription, bmcName string) (current, stale []Subscription) {
-	metricsPath := metricsPathFor(r.cfg.SubscriberID) + bmcName
-	alertsPath := alertsPathFor(r.cfg.SubscriberID) + bmcName
-	for _, s := range subs {
-		if !strings.Contains(s.Destination, metricsPath) && !strings.Contains(s.Destination, alertsPath) {
-			continue // not ours
-		}
-		if strings.HasPrefix(s.Destination, r.cfg.ReceiverURL) {
-			current = append(current, s)
-		} else {
-			stale = append(stale, s)
-		}
+func (r *SubscriptionReconciler) tearDownOne(ctx context.Context, bmcName string) {
+	bmc := &metalv1alpha1.BMC{}
+	if err := r.Get(ctx, types.NamespacedName{Name: bmcName}, bmc); err != nil {
+		return // BMC gone, nothing to tear down
 	}
-	return
+	_ = r.deleteAllSubscriptions(ctx, bmc)
 }
 
-// destinationFor builds the subscription destination URL for the given path kind
-// and BMC name.
-func (r *SubscriptionReconciler) destinationFor(kind, bmcName string) string {
-	if r.cfg.SubscriberID == "" {
-		return r.cfg.ReceiverURL + pathPrefix + kind + "/" + bmcName
+func (r *SubscriptionReconciler) forgetSinks(bmcName string) {
+	if r.cfg.Sink != nil {
+		r.cfg.Sink.Forget(bmcName)
 	}
-	return r.cfg.ReceiverURL + pathPrefix + r.cfg.SubscriberID + "/" + kind + "/" + bmcName
+	if r.cfg.AlertHandler != nil {
+		r.cfg.AlertHandler.Forget(bmcName)
+	}
+	r.testPending.Delete(bmcName)
+	r.lastTestTime.Delete(bmcName)
+}
+
+// classify partitions subscriptions into current (ours, correct host) and stale
+// (ours, different host — leftover from old instance / service rename).
+func (r *SubscriptionReconciler) classify(subs []Subscription, bmcName string) (current, stale []Subscription) {
+	srvHost := r.srvURL.Host
+	srvScheme := r.srvURL.Scheme
+	subscriberID := r.cfg.SubscriberID
+
+	for _, sub := range subs {
+		u, err := url.Parse(sub.Destination)
+		if err != nil {
+			continue
+		}
+		if !strings.HasPrefix(u.Path, pathPrefix) {
+			continue
+		}
+		segs := strings.Split(strings.Trim(u.Path, "/"), "/")
+		var typeSeg, foundSubscriberID string
+		switch len(segs) {
+		case 3:
+			typeSeg = segs[1]
+			if subscriberID != "" {
+				stale = append(stale, sub)
+				continue
+			}
+		case 4:
+			foundSubscriberID = segs[1]
+			typeSeg = segs[2]
+		default:
+			continue
+		}
+		if segs[len(segs)-1] != bmcName {
+			continue
+		}
+		if typeSeg != "metricsreport" && typeSeg != "alerts" {
+			continue
+		}
+		if foundSubscriberID != subscriberID {
+			continue
+		}
+
+		if u.Scheme == srvScheme && u.Host == srvHost {
+			current = append(current, sub)
+		} else {
+			stale = append(stale, sub)
+		}
+	}
+	return current, stale
+}
+
+func (r *SubscriptionReconciler) destinationFor(kind, bmcName string) string {
+	u := *r.srvURL
+	if r.cfg.SubscriberID != "" {
+		u.Path = pathPrefix + r.cfg.SubscriberID + "/" + kind + "/" + bmcName
+	} else {
+		u.Path = pathPrefix + kind + "/" + bmcName
+	}
+	return u.String()
 }
 
 func (r *SubscriptionReconciler) fetchCredentials(ctx context.Context, bmc *metalv1alpha1.BMC) (string, string, error) {
@@ -290,171 +447,235 @@ func (r *SubscriptionReconciler) fetchCredentials(ctx context.Context, bmc *meta
 	return username, password, nil
 }
 
+// NotifyTestEvent is called by the push receiver when an alert arrives.
+// It correlates the messageId against any pending test for the BMC.
+func (r *SubscriptionReconciler) NotifyTestEvent(bmcName, messageId string) {
+	raw, ok := r.testPending.Load(bmcName)
+	if !ok {
+		return
+	}
+	entry := raw.(testEntry)
+	if time.Now().After(entry.deadline) {
+		return
+	}
+	if entry.msgID != "" && entry.msgID != messageId {
+		return
+	}
+	r.testPending.Delete(bmcName)
+	r.lastTestTime.Store(bmcName, time.Now())
+	r.log.Info("Test event round-trip confirmed", "bmc", bmcName)
+}
+
+// testEventConfig returns the test event interval and timeout from the
+// ConfigLoader. Returns (0, 0) when the feature is disabled.
+func (r *SubscriptionReconciler) testEventConfig() (interval, timeout time.Duration) {
+	if r.cfg.ConfigLoader == nil {
+		return 0, 0
+	}
+	cfg := r.cfg.ConfigLoader.Config()
+	if cfg == nil {
+		return 0, 0
+	}
+	interval = cfg.TestEventInterval
+	if interval == 0 {
+		return 0, 0
+	}
+	timeout = cfg.TestEventTimeout
+	if timeout == 0 {
+		timeout = 30 * time.Second
+	}
+	return interval, timeout
+}
+
+// sendTestEvent submits a SubmitTestEvent action to the BMC and records the
+// pending round-trip. Returns the requeue duration (timeout) if a test was
+// sent, or 0 if the feature is disabled or the rate limit suppressed the send.
+func (r *SubscriptionReconciler) sendTestEvent(ctx context.Context, bmc *metalv1alpha1.BMC, c Client) time.Duration {
+	log := r.log.WithValues("bmc", bmc.Name)
+	interval, timeout := r.testEventConfig()
+	if interval == 0 {
+		return 0 // feature disabled
+	}
+
+	// Don't send if one is already pending and not yet expired.
+	if raw, ok := r.testPending.Load(bmc.Name); ok {
+		if time.Now().Before(raw.(testEntry).deadline) {
+			return 0
+		}
+		r.testPending.Delete(bmc.Name) // expired — clear and retry
+	}
+
+	// Rate-limit: skip if we sent one recently (and it was confirmed).
+	if last, ok := r.lastTestTime.Load(bmc.Name); ok {
+		if time.Since(last.(time.Time)) < interval {
+			return 0
+		}
+	}
+
+	msgID := fmt.Sprintf("TestEvent.MTO.%d", time.Now().UnixMilli())
+	if err := c.SubmitTestEvent(ctx, msgID); err != nil {
+		log.Error(err, "Failed to submit test event")
+		return 0
+	}
+	r.testPending.Store(bmc.Name, testEntry{
+		deadline: time.Now().Add(timeout),
+		msgID:    msgID,
+	})
+	r.lastTestTime.Store(bmc.Name, time.Now())
+	log.Info("Submitted test event", "msgID", msgID)
+	return timeout
+}
+
 // ---------------------------------------------------------------------------
-// Production Redfish client
+// Production gofish-based Redfish client
 // ---------------------------------------------------------------------------
 
 type defaultClientFactory struct{}
 
-func (f *defaultClientFactory) NewClient(_ context.Context, host, username, password string) (Client, error) {
-	return &redfishClient{
-		hc: &http.Client{
-			Timeout: 30 * time.Second,
-			Transport: &http.Transport{
-				TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
-			},
-		},
-		base:     "https://" + host,
-		username: username,
-		password: password,
+func (f *defaultClientFactory) NewClient(ctx context.Context, host, username, password string, insecureTLS bool) (Client, error) {
+	opts := metalbmc.Options{
+		Endpoint:    "https://" + host,
+		Username:    username,
+		Password:    password,
+		BasicAuth:   true,
+		InsecureTLS: insecureTLS,
+	}
+	base, err := metalbmc.NewRedfishBMCClient(ctx, opts)
+	if err != nil {
+		return nil, err
+	}
+	return wrapClient(base)
+}
+
+// extendedClient augments metalbmc.BMC with ListEventSubscriptions and
+// ProbeEventService, which the base BMC interface does not expose.
+type extendedClient struct {
+	metalbmc.BMC
+	api *gofish.APIClient
+}
+
+var _ Client = (*extendedClient)(nil)
+
+func wrapClient(base metalbmc.BMC) (Client, error) {
+	accessor, ok := base.(interface{ Client() *gofish.APIClient })
+	if !ok {
+		return nil, fmt.Errorf("bmc client %T does not expose Client() *gofish.APIClient", base)
+	}
+	return &extendedClient{BMC: base, api: accessor.Client()}, nil
+}
+
+func (c *extendedClient) ListEventSubscriptions(_ context.Context) ([]Subscription, error) {
+	svc := c.api.GetService()
+	if svc == nil {
+		return nil, fmt.Errorf("list subscriptions: no service root")
+	}
+	es, err := svc.EventService()
+	if err != nil {
+		return nil, fmt.Errorf("list subscriptions: event service: %w", err)
+	}
+	dests, err := es.Subscriptions()
+	if err != nil {
+		return nil, fmt.Errorf("list subscriptions: %w", err)
+	}
+	out := make([]Subscription, 0, len(dests))
+	for _, d := range dests {
+		out = append(out, Subscription{
+			URI:         d.ODataID,
+			Destination: d.Destination,
+			EventFormat: string(d.EventFormatType),
+		})
+	}
+	return out, nil
+}
+
+func (c *extendedClient) ProbeEventService(_ context.Context) (*EventServiceCapabilities, error) {
+	svc := c.api.GetService()
+	if svc == nil {
+		return nil, fmt.Errorf("probe event service: no service root")
+	}
+	es, err := svc.EventService()
+	if err != nil {
+		return nil, fmt.Errorf("probe event service: %w", err)
+	}
+	return &EventServiceCapabilities{
+		ServiceEnabled:   es.ServiceEnabled,
+		HasSubscriptions: es.SubscriptionsLink != "",
 	}, nil
 }
 
-type redfishClient struct {
-	hc       *http.Client
-	base     string
-	username string
-	password string
+func (c *extendedClient) SubmitTestEvent(_ context.Context, msgID string) error {
+	svc := c.api.GetService()
+	if svc == nil {
+		return fmt.Errorf("submit test event: no service root")
+	}
+	es, err := svc.EventService()
+	if err != nil {
+		return fmt.Errorf("submit test event: event service: %w", err)
+	}
+	params := &redfishschemas.EventServiceSubmitTestEventParameters{}
+	if msgID != "" {
+		params.MessageID = msgID
+	}
+	_, err = es.SubmitTestEvent(params)
+	return err
 }
 
-func (c *redfishClient) Close() {}
+// BMCMetricFetcher performs authenticated GET requests to fetch full MetricReport
+// bodies from BMCs that send empty-body push notifications (Dell 17G).
+type BMCMetricFetcher struct {
+	factory     ClientFactory
+	kubeClient  client.Client
+	insecureTLS bool
+	log         logr.Logger
+}
 
-func (c *redfishClient) ListEventSubscriptions(ctx context.Context) ([]Subscription, error) {
-	type member struct {
-		ODataID string `json:"@odata.id"`
+// NewBMCMetricFetcher creates a MetricFetcher backed by the reconciler's credentials.
+func NewBMCMetricFetcher(kubeClient client.Client, factory ClientFactory, insecureTLS bool, log logr.Logger) *BMCMetricFetcher {
+	return &BMCMetricFetcher{
+		factory:     factory,
+		kubeClient:  kubeClient,
+		insecureTLS: insecureTLS,
+		log:         log,
 	}
-	type collection struct {
-		Members []member `json:"Members"`
+}
+
+func (f *BMCMetricFetcher) FetchMetricReport(ctx context.Context, bmcName, odataID string) ([]byte, error) {
+	bmc := &metalv1alpha1.BMC{}
+	if err := f.kubeClient.Get(ctx, types.NamespacedName{Name: bmcName}, bmc); err != nil {
+		return nil, fmt.Errorf("get BMC %q: %w", bmcName, err)
+	}
+	secret := &metalv1alpha1.BMCSecret{}
+	if err := f.kubeClient.Get(ctx, types.NamespacedName{Name: bmc.Spec.BMCSecretRef.Name}, secret); err != nil {
+		return nil, fmt.Errorf("get BMCSecret: %w", err)
+	}
+	username := string(secret.Data[metalv1alpha1.BMCSecretUsernameKeyName])
+	password := string(secret.Data[metalv1alpha1.BMCSecretPasswordKeyName])
+
+	ip := bmc.Status.IP.String()
+	if ip == "" || ip == "<nil>" {
+		return nil, fmt.Errorf("BMC %q has no IP", bmcName)
 	}
 
-	body, err := c.get(ctx, "/redfish/v1/EventService/Subscriptions")
-	if err != nil {
-		return nil, err
-	}
-	var coll collection
-	if err := json.Unmarshal(body, &coll); err != nil {
-		return nil, fmt.Errorf("decode Subscriptions collection: %w", err)
-	}
-
-	var subs []Subscription
-	for _, m := range coll.Members {
-		sub, err := c.getSubscription(ctx, m.ODataID)
-		if err != nil {
-			continue // skip unreadable subscriptions
+	hc := &http.Client{Timeout: 30 * time.Second}
+	if f.insecureTLS {
+		hc.Transport = &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
 		}
-		subs = append(subs, sub)
-	}
-	return subs, nil
-}
-
-func (c *redfishClient) getSubscription(ctx context.Context, uri string) (Subscription, error) {
-	type dest struct {
-		Destination     string `json:"Destination"`
-		EventFormatType string `json:"EventFormatType"`
-	}
-	body, err := c.get(ctx, uri)
-	if err != nil {
-		return Subscription{}, err
-	}
-	var d dest
-	if err := json.Unmarshal(body, &d); err != nil {
-		return Subscription{}, fmt.Errorf("decode Subscription %q: %w", uri, err)
-	}
-	return Subscription{URI: uri, Destination: d.Destination, EventFormat: d.EventFormatType}, nil
-}
-
-func (c *redfishClient) CreateEventSubscription(ctx context.Context, destination, eventFormatType string) (string, error) {
-	payload := map[string]string{
-		"Destination":     destination,
-		"EventFormatType": eventFormatType,
-		"Protocol":        "Redfish",
-	}
-	rawBody, err := json.Marshal(payload)
-	if err != nil {
-		return "", err
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.base+"/redfish/v1/EventService/Subscriptions", bytes.NewReader(rawBody))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.SetBasicAuth(c.username, c.password)
-
-	resp, err := c.hc.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("POST Subscriptions: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	respBody, _ := io.ReadAll(resp.Body)
-
-	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("POST Subscriptions returned %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	if loc := resp.Header.Get("Location"); loc != "" {
-		return c.redfishPath(loc), nil
-	}
-
-	var created struct {
-		ODataID string `json:"@odata.id"`
-	}
-	if err := json.Unmarshal(respBody, &created); err == nil && created.ODataID != "" {
-		return created.ODataID, nil
-	}
-
-	return "", fmt.Errorf("POST Subscriptions: could not determine subscription URI from response")
-}
-
-func (c *redfishClient) DeleteEventSubscription(ctx context.Context, uri string) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.base+uri, nil)
-	if err != nil {
-		return err
-	}
-	req.SetBasicAuth(c.username, c.password)
-
-	resp, err := c.hc.Do(req)
-	if err != nil {
-		return fmt.Errorf("DELETE %q: %w", uri, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-	_, _ = io.Copy(io.Discard, resp.Body)
-
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
-		return fmt.Errorf("DELETE %q returned %d", uri, resp.StatusCode)
-	}
-	return nil
-}
-
-func (c *redfishClient) get(ctx context.Context, path string) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.base+path, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, "https://"+ip+odataID, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.SetBasicAuth(c.username, c.password)
+	req.SetBasicAuth(username, password)
 
-	resp, err := c.hc.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("GET %q: %w", path, err)
+		return nil, fmt.Errorf("GET %q: %w", odataID, err)
 	}
 	defer func() { _ = resp.Body.Close() }()
-
 	if resp.StatusCode != http.StatusOK {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("GET %q returned %d: %s", path, resp.StatusCode, string(b))
+		return nil, fmt.Errorf("GET %q returned %d", odataID, resp.StatusCode)
 	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("read body for %q: %w", path, err)
-	}
-	return body, nil
-}
-
-// redfishPath extracts the /redfish/... path from a full URL or returns the
-// value unchanged if it is already a path.
-func (c *redfishClient) redfishPath(loc string) string {
-	if idx := strings.Index(loc, "/redfish/"); idx >= 0 {
-		return loc[idx:]
-	}
-	return loc
+	return io.ReadAll(resp.Body)
 }

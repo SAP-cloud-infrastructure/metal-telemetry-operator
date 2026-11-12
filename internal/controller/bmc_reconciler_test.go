@@ -87,11 +87,7 @@ func newDispatchReconciler(t *testing.T, objs ...runtime.Object) *BMCReconciler 
 	}
 }
 
-func ptrMode(m telemetryv1alpha1.TelemetryMode) *telemetryv1alpha1.TelemetryMode {
-	p := new(telemetryv1alpha1.TelemetryMode)
-	*p = m
-	return p
-}
+func ptrMode(m telemetryv1alpha1.TelemetryMode) *telemetryv1alpha1.TelemetryMode { return new(m) }
 
 func enabledBMC(name string, annotations map[string]string) *metalv1alpha1.BMC {
 	b := &metalv1alpha1.BMC{
