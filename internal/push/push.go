@@ -9,6 +9,7 @@ import (
 	"github.com/go-logr/logr"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	"github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/sink"
 	prometheusSink "github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/sink/prometheus"
 	ctrl "sigs.k8s.io/controller-runtime"
 )
@@ -28,6 +29,10 @@ type Options struct {
 	ConfigName string
 	// ConfigNamespace is the namespace of the ConfigMap.
 	ConfigNamespace string
+	// Sink is an optional pre-built MetricReportSink. When set, AddTo uses it
+	// instead of creating a new one. Inject a shared instance from main.go to
+	// avoid duplicate Prometheus gauge registration when the SSE path is also enabled.
+	Sink sink.MetricReportSink
 	// Log is the logger; defaults to the controller-runtime logger.
 	Log logr.Logger
 }
@@ -40,15 +45,19 @@ func AddTo(mgr ctrl.Manager, opts *Options) error {
 		log = ctrl.Log.WithName("push")
 	}
 
-	sink, err := prometheusSink.New(ctrlmetrics.Registry)
-	if err != nil {
-		return fmt.Errorf("create push prometheus sink: %w", err)
+	s := opts.Sink
+	if s == nil {
+		var err error
+		s, err = prometheusSink.New(ctrlmetrics.Registry)
+		if err != nil {
+			return fmt.Errorf("create push prometheus sink: %w", err)
+		}
 	}
 
 	receiver, err := NewReceiver(ReceiverConfig{
 		Addr:         opts.EventsAddr,
 		SubscriberID: opts.SubscriberID,
-		Sink:         sink,
+		Sink:         s,
 		Log:          log.WithName("receiver"),
 	})
 	if err != nil {

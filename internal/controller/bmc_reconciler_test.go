@@ -80,10 +80,10 @@ func newDispatchReconciler(t *testing.T, objs ...runtime.Object) *BMCReconciler 
 	fakeClient := b.Build()
 	cm := sse.NewConnectionManager(10, &nopSink{}, &nopStatusWriter{}, logr.Discard())
 	return &BMCReconciler{
-		Client:  fakeClient,
-		Scheme:  s,
-		connMgr: cm,
-		sink:    &nopSink{},
+		Client:   fakeClient,
+		Scheme:   s,
+		connMgr:  cm,
+		sinkInst: &nopSink{},
 	}
 }
 

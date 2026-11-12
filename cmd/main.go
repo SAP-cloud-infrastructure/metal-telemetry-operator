@@ -16,6 +16,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	metalv1alpha1 "github.com/ironcore-dev/metal-operator/api/v1alpha1"
@@ -23,6 +24,7 @@ import (
 	telemetryv1alpha1 "github.com/SAP-cloud-infrastructure/metal-telemetry-operator/api/v1alpha1"
 	"github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/controller"
 	"github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/push"
+	prometheusSink "github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/sink/prometheus"
 	// +kubebuilder:scaffold:imports
 )
 
@@ -120,11 +122,20 @@ func main() {
 		}
 	}
 
+	// Create the shared Prometheus sink once. Both the SSE reconciler and the
+	// push receiver register to the same gauge; creating it twice would fail.
+	sharedSink, err := prometheusSink.New(ctrlmetrics.Registry)
+	if err != nil {
+		setupLog.Error(err, "Failed to create shared prometheus sink")
+		os.Exit(1)
+	}
+
 	if err := (&controller.BMCReconciler{
 		Client:                mgr.GetClient(),
 		Scheme:                mgr.GetScheme(),
 		MaxConcurrentConnects: maxConcurrentConnects,
 		ConfigLoader:          pushLoader,
+		Sink:                  sharedSink,
 	}).SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "BMC")
 		os.Exit(1)
@@ -137,6 +148,7 @@ func main() {
 			SubscriberID:    pushSubscriberID,
 			ConfigName:      pushConfigName,
 			ConfigNamespace: pushConfigNamespace,
+			Sink:            sharedSink,
 		}); err != nil {
 			setupLog.Error(err, "Failed to set up push pipeline")
 			os.Exit(1)

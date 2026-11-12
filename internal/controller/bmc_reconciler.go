@@ -43,21 +43,31 @@ type BMCReconciler struct {
 	// to or from MetricReport. Optional; when nil the informer triggers reconcile.
 	EnqueuePushBMC func(name string)
 
+	// Sink is an optional pre-built MetricReportSink. When set, SetupWithManager
+	// uses it instead of creating a new one. Inject a shared instance from main.go
+	// to avoid duplicate Prometheus gauge registration when the push pipeline is
+	// also enabled.
+	Sink sink.MetricReportSink
+
 	initOnce sync.Once
 	connMgr  *sse.ConnectionManager
-	sink     sink.MetricReportSink
+	sinkInst sink.MetricReportSink
 }
 
 // SetupWithManager initializes the reconciler and registers it with the manager.
 func (r *BMCReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	var initErr error
 	r.initOnce.Do(func() {
-		s, err := prometheusSink.New(ctrlmetrics.Registry)
-		if err != nil {
-			initErr = fmt.Errorf("create prometheus sink: %w", err)
-			return
+		s := r.Sink
+		if s == nil {
+			var err error
+			s, err = prometheusSink.New(ctrlmetrics.Registry)
+			if err != nil {
+				initErr = fmt.Errorf("create prometheus sink: %w", err)
+				return
+			}
 		}
-		r.sink = s
+		r.sinkInst = s
 		r.connMgr = sse.NewConnectionManager(
 			int64(r.MaxConcurrentConnects),
 			s,
@@ -84,7 +94,7 @@ func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	if err := r.Get(ctx, req.NamespacedName, bmc); err != nil {
 		if apierrors.IsNotFound(err) {
 			r.connMgr.Stop(req.Name)
-			r.sink.Forget(req.Name)
+			r.sinkInst.Forget(req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -93,7 +103,7 @@ func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	// If the BMC is being deleted or not yet enabled, shut down any connection.
 	if !bmc.DeletionTimestamp.IsZero() || bmc.Status.State != metalv1alpha1.BMCStateEnabled {
 		r.connMgr.Stop(bmc.Name)
-		r.sink.Forget(bmc.Name)
+		r.sinkInst.Forget(bmc.Name)
 		if err := r.deleteOwnedTelemetry(ctx, bmc.Name); err != nil {
 			return ctrl.Result{}, err
 		}
