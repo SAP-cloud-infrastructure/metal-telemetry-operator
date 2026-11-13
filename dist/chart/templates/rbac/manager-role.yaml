@@ -61,6 +61,13 @@ rules:
   verbs:
   - update
 - apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - get
+  - create
+- apiGroups:
   - telemetry.metal.ironcore.dev
   resources:
   - bmctelemetries/status

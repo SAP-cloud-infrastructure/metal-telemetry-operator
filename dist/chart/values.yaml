@@ -240,6 +240,16 @@ push:
   ##
   configNamespace: ""
 
+  ## Name of a Kubernetes Secret holding a 32-byte shared key used to
+  ## authenticate incoming Redfish event POSTs. The operator creates the Secret
+  ## automatically on first start if it does not exist. When set, BMCs must
+  ## include "Authorization: Bearer <hex(key)>" in every event POST; the same
+  ## token is added to Redfish subscription HttpHeaders automatically.
+  ## Requires push.configNamespace to be set (the Secret is created there).
+  ## When empty, the receiver accepts unauthenticated POSTs.
+  ##
+  sharedSecretName: ""
+
   ## Ingress configuration for the push receiver.
   ## Required when receiverURL points to a cluster-internal ingress.
   ##

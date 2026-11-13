@@ -51,7 +51,7 @@ func (f *fakeRedfishClient) ListEventSubscriptions(_ context.Context) ([]push.Su
 	return cp, nil
 }
 
-func (f *fakeRedfishClient) CreateEventSubscription(_ context.Context, destination, eventFormatType string) (string, error) {
+func (f *fakeRedfishClient) CreateEventSubscription(_ context.Context, destination, eventFormatType string, _ map[string]string) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.createErrByType != nil {

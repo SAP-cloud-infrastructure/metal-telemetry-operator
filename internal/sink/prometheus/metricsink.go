@@ -22,6 +22,13 @@ const (
 	labelType          = "type"
 	labelUnit          = "unit"
 	labelOriginContext = "origin_context"
+
+	// defaultMaxMetricBMCs bounds how many distinct BMC names the MetricReportSink
+	// will track before dropping incoming samples for unknown hosts.
+	defaultMaxMetricBMCs = 2000
+	// defaultMaxMetricSeriesPerBMC bounds how many distinct
+	// {metric_id,type,unit,origin_context} label tuples will be minted per BMC.
+	defaultMaxMetricSeriesPerBMC = 1000
 )
 
 // seriesKey identifies one redfish_telemetry_reading time series.
@@ -38,6 +45,9 @@ type MetricReportSink struct {
 	gauge *prometheus.GaugeVec
 	log   logr.Logger
 
+	maxBMCs         int
+	maxSeriesPerBMC int
+
 	mu     sync.Mutex
 	series map[string]map[seriesKey]struct{}
 }
@@ -51,9 +61,18 @@ func New(reg prometheus.Registerer) (*MetricReportSink, error) {
 
 // NewWithLogger creates a MetricReportSink with the given logger.
 func NewWithLogger(reg prometheus.Registerer, log logr.Logger) (*MetricReportSink, error) {
+	return NewWithOptions(reg, log, defaultMaxMetricBMCs, defaultMaxMetricSeriesPerBMC)
+}
+
+// NewWithOptions constructs a MetricReportSink with explicit cardinality caps.
+// maxBMCs bounds distinct BMC names; maxSeriesPerBMC bounds distinct label
+// tuples per BMC. Samples exceeding either cap are dropped.
+func NewWithOptions(reg prometheus.Registerer, log logr.Logger, maxBMCs, maxSeriesPerBMC int) (*MetricReportSink, error) {
 	s := &MetricReportSink{
-		log:    log,
-		series: make(map[string]map[seriesKey]struct{}),
+		log:             log,
+		maxBMCs:         maxBMCs,
+		maxSeriesPerBMC: maxSeriesPerBMC,
+		series:          make(map[string]map[seriesKey]struct{}),
 	}
 	s.gauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: metricNamespace,
@@ -78,6 +97,10 @@ func (s *MetricReportSink) PublishSamples(_ context.Context, bmcName string, sam
 
 	keys, ok := s.series[bmcName]
 	if !ok {
+		if len(s.series) >= s.maxBMCs {
+			s.log.V(1).Info("Dropping samples: BMC name limit reached", "hostname", bmcName, "limit", s.maxBMCs)
+			return nil
+		}
 		keys = make(map[seriesKey]struct{})
 		s.series[bmcName] = keys
 	}
@@ -91,6 +114,11 @@ func (s *MetricReportSink) PublishSamples(_ context.Context, bmcName string, sam
 			valueType:     sm.Type,
 			unit:          sm.Unit,
 			originContext: sm.MetricProperty,
+		}
+		if _, exists := keys[key]; !exists && len(keys) >= s.maxSeriesPerBMC {
+			s.log.V(1).Info("Dropping sample: per-BMC series limit reached",
+				"hostname", bmcName, "metricID", sm.MetricID, "limit", s.maxSeriesPerBMC)
+			continue
 		}
 		keys[key] = struct{}{}
 		s.gauge.With(prometheus.Labels{

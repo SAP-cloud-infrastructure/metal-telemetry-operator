@@ -44,7 +44,7 @@ type Subscription struct {
 
 // Client is the minimal Redfish interface the subscription reconciler uses.
 type Client interface {
-	CreateEventSubscription(ctx context.Context, destination, eventFormatType string) (string, error)
+	CreateEventSubscription(ctx context.Context, destination, eventFormatType string, httpHeaders map[string]string) (string, error)
 	DeleteEventSubscription(ctx context.Context, uri string) error
 	ListEventSubscriptions(ctx context.Context) ([]Subscription, error)
 	SubmitTestEvent(ctx context.Context, messageId string) error
@@ -69,6 +69,11 @@ type ReconcilerConfig struct {
 	ReceiverURL string
 	// SubscriberID scopes subscription destination paths. May be empty.
 	SubscriberID string
+	// SubscriptionHeaders are optional HTTP headers included in every
+	// CreateEventSubscription call. BMCs include these headers verbatim in
+	// their event POSTs, enabling bearer-token authentication on the receiver.
+	// Nil means no extra headers (backward compatible).
+	SubscriptionHeaders map[string]string
 	// Factory creates Redfish clients; defaults to the production HTTPS client.
 	Factory ClientFactory
 	// TestEventInterval is the cadence for health-check test events.
@@ -231,7 +236,7 @@ func (r *SubscriptionReconciler) ensureSubscriptions(ctx context.Context, bmc *m
 
 	if !hasMetrics {
 		dest := r.destinationFor("metricsreport", bmc.Name)
-		uri, err := rc.CreateEventSubscription(ctx, dest, "MetricReport")
+		uri, err := rc.CreateEventSubscription(ctx, dest, "MetricReport", r.cfg.SubscriptionHeaders)
 		if err != nil {
 			if errors.Is(err, ErrSubscriptionSlotsFull) {
 				r.setConnState(ctx, bmc.Name+"-metrics", telemetryv1alpha1.ConnectionStateSlotsFull)
@@ -244,7 +249,7 @@ func (r *SubscriptionReconciler) ensureSubscriptions(ctx context.Context, bmc *m
 
 	if !hasAlerts {
 		dest := r.destinationFor("alerts", bmc.Name)
-		uri, err := rc.CreateEventSubscription(ctx, dest, "Event")
+		uri, err := rc.CreateEventSubscription(ctx, dest, "Event", r.cfg.SubscriptionHeaders)
 		if err != nil {
 			if errors.Is(err, ErrSubscriptionSlotsFull) {
 				r.setConnState(ctx, bmc.Name+"-alerts", telemetryv1alpha1.ConnectionStateSlotsFull)
@@ -492,11 +497,14 @@ func (c *redfishClient) getSubscription(ctx context.Context, uri string) (Subscr
 	return Subscription{URI: uri, Destination: d.Destination, EventFormat: d.EventFormatType}, nil
 }
 
-func (c *redfishClient) CreateEventSubscription(ctx context.Context, destination, eventFormatType string) (string, error) {
-	payload := map[string]string{
+func (c *redfishClient) CreateEventSubscription(ctx context.Context, destination, eventFormatType string, httpHeaders map[string]string) (string, error) {
+	payload := map[string]any{
 		"Destination":     destination,
 		"EventFormatType": eventFormatType,
 		"Protocol":        "Redfish",
+	}
+	if len(httpHeaders) > 0 {
+		payload["HttpHeaders"] = httpHeaders
 	}
 	rawBody, err := json.Marshal(payload)
 	if err != nil {

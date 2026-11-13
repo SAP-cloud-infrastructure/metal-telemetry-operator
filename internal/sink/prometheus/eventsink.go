@@ -29,6 +29,14 @@ const (
 	// entry evicts FIFO so EventIDs reused after a BMC reset/firmware-update
 	// become eligible to be counted again.
 	maxSeenIDsPerBMC = 4096
+
+	// defaultMaxBMCs is the maximum number of distinct BMC names the sink
+	// will track. Requests from unknown BMCs beyond this limit are dropped.
+	defaultMaxBMCs = 2000
+	// defaultMaxSeriesPerBMC is the maximum number of distinct
+	// {severity,message_id,component} label tuples the sink will mint per BMC.
+	// Each unique tuple is a permanent Prometheus series until Forget is called.
+	defaultMaxSeriesPerBMC = 512
 )
 
 // OnCriticalFunc is invoked for every Critical-severity event after counter mutation.
@@ -98,6 +106,9 @@ type EventSink struct {
 	OnWarning  OnWarningFunc
 	OnClear    OnClearFunc
 
+	maxBMCs         int
+	maxSeriesPerBMC int
+
 	mu         sync.Mutex
 	seenForBMC map[string]*seenSet
 	series     map[string]map[alertLabelKey]struct{}
@@ -110,10 +121,21 @@ func NewEventSink(reg prometheus.Registerer) (*EventSink, error) {
 }
 
 func NewEventSinkWithLogger(reg prometheus.Registerer, log logr.Logger) (*EventSink, error) {
+	return NewEventSinkWithOptions(reg, log, defaultMaxBMCs, defaultMaxSeriesPerBMC)
+}
+
+// NewEventSinkWithOptions constructs an EventSink with explicit cardinality
+// caps. maxBMCs bounds how many distinct BMC names will be tracked; once
+// reached, events from unknown BMCs are dropped. maxSeriesPerBMC bounds how
+// many distinct label tuples will be minted per BMC; once reached, new tuples
+// for that BMC are dropped.
+func NewEventSinkWithOptions(reg prometheus.Registerer, log logr.Logger, maxBMCs, maxSeriesPerBMC int) (*EventSink, error) {
 	s := &EventSink{
-		log:        log,
-		seenForBMC: make(map[string]*seenSet),
-		series:     make(map[string]map[alertLabelKey]struct{}),
+		log:             log,
+		maxBMCs:         maxBMCs,
+		maxSeriesPerBMC: maxSeriesPerBMC,
+		seenForBMC:      make(map[string]*seenSet),
+		series:          make(map[string]map[alertLabelKey]struct{}),
 	}
 	s.counter = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: metricNamespace,
@@ -137,6 +159,11 @@ func (s *EventSink) PublishEvents(ctx context.Context, bmcName string, events []
 	s.mu.Lock()
 	seenIDs := s.ensureSeenSet(bmcName)
 	keys := s.ensureSeriesMap(bmcName)
+	if seenIDs == nil || keys == nil {
+		s.mu.Unlock()
+		s.log.V(1).Info("Dropping events: BMC name limit reached", "hostname", bmcName, "limit", s.maxBMCs)
+		return nil
+	}
 
 	type dispatchEntry struct {
 		event      sink.Event
@@ -216,6 +243,9 @@ func (s *EventSink) commitCritical(bmcName string, ev sink.Event) {
 	defer s.mu.Unlock()
 	seenIDs := s.ensureSeenSet(bmcName)
 	keys := s.ensureSeriesMap(bmcName)
+	if seenIDs == nil || keys == nil {
+		return
+	}
 	if seenIDs.contains(ev.EventID) {
 		return
 	}
@@ -239,6 +269,9 @@ func (s *EventSink) ensureSeenSet(bmcName string) *seenSet {
 	if set, ok := s.seenForBMC[bmcName]; ok {
 		return set
 	}
+	if len(s.seenForBMC) >= s.maxBMCs {
+		return nil
+	}
 	set := newSeenSet(maxSeenIDsPerBMC)
 	s.seenForBMC[bmcName] = set
 	return set
@@ -247,6 +280,9 @@ func (s *EventSink) ensureSeenSet(bmcName string) *seenSet {
 func (s *EventSink) ensureSeriesMap(bmcName string) map[alertLabelKey]struct{} {
 	if m, ok := s.series[bmcName]; ok {
 		return m
+	}
+	if len(s.series) >= s.maxBMCs {
+		return nil
 	}
 	m := make(map[alertLabelKey]struct{})
 	s.series[bmcName] = m
@@ -258,6 +294,11 @@ func (s *EventSink) recordEventLocked(bmcName string, ev sink.Event, keys map[al
 		severity:  canonicalSeverity(ev.Severity),
 		messageID: ev.MessageID,
 		component: componentFromOrigin(ev.OriginOfCondition),
+	}
+	if _, exists := keys[key]; !exists && len(keys) >= s.maxSeriesPerBMC {
+		s.log.V(1).Info("Dropping event: per-BMC series limit reached",
+			"hostname", bmcName, "limit", s.maxSeriesPerBMC)
+		return
 	}
 	keys[key] = struct{}{}
 	s.counter.With(prometheus.Labels{

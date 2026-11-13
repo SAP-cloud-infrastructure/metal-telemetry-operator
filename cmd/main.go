@@ -55,6 +55,7 @@ func main() {
 	var pushSubscriberID string
 	var pushConfigName string
 	var pushConfigNamespace string
+	var pushSharedSecretName string
 	tlsOpts := make([]func(*tls.Config), 0, 1)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metrics endpoint binds to.")
@@ -77,6 +78,12 @@ func main() {
 		"Name of the ConfigMap holding push mode overrides and exclusion rules.")
 	flag.StringVar(&pushConfigNamespace, "push-config-namespace", "",
 		"Namespace of the push config ConfigMap.")
+	flag.StringVar(&pushSharedSecretName, "push-events-shared-secret-name", "",
+		"Name of a Kubernetes Secret (in push-config-namespace) holding a 32-byte shared key "+
+			"used to authenticate incoming Redfish event POSTs. The Secret is created automatically "+
+			"on first start if it does not exist. When set, BMCs must include "+
+			"\"Authorization: Bearer <hex(key)>\" in every event POST. "+
+			"When empty, the receiver accepts unauthenticated POSTs.")
 
 	// Disable HTTP/2 to avoid stream cancellation CVEs.
 	disableHTTP2 := func(c *tls.Config) {
@@ -160,14 +167,15 @@ func main() {
 
 	if pushEventsAddr != "" && pushReceiverURL != "" {
 		if err := push.AddTo(mgr, &push.Options{
-			ReceiverURL:     pushReceiverURL,
-			EventsAddr:      pushEventsAddr,
-			SubscriberID:    pushSubscriberID,
-			ConfigName:      pushConfigName,
-			ConfigNamespace: pushConfigNamespace,
-			Sink:            sharedSink,
-			EventSink:       bmcReconciler.AlertEventSink,
-			StatusWriter:    bmcReconciler,
+			ReceiverURL:      pushReceiverURL,
+			EventsAddr:       pushEventsAddr,
+			SubscriberID:     pushSubscriberID,
+			ConfigName:       pushConfigName,
+			ConfigNamespace:  pushConfigNamespace,
+			SharedSecretName: pushSharedSecretName,
+			Sink:             sharedSink,
+			EventSink:        bmcReconciler.AlertEventSink,
+			StatusWriter:     bmcReconciler,
 		}); err != nil {
 			setupLog.Error(err, "Failed to set up push pipeline")
 			os.Exit(1)

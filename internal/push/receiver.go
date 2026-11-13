@@ -5,6 +5,8 @@ package push
 
 import (
 	"context"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -51,6 +53,12 @@ type ReceiverConfig struct {
 	// SubscriberID scopes all receiver routes under a per-subscriber path segment.
 	// When empty, routes are /serverevents/metricsreport/ and /serverevents/alerts/.
 	SubscriberID string
+	// SharedSecret, when non-empty, enables bearer-token authentication on the
+	// MetricReport and alert endpoints. Every incoming POST must carry:
+	//   Authorization: Bearer <hex(SharedSecret)>
+	// Requests without a matching token are rejected with 401. When nil,
+	// the endpoints are unauthenticated (backward compatible).
+	SharedSecret []byte
 	// Sink receives decoded MetricReport samples. Required.
 	Sink sink.MetricReportSink
 	// EventSink receives decoded alert events. May be nil.
@@ -76,6 +84,9 @@ type Receiver struct {
 	log         logr.Logger
 	alertsPath  string
 	metricsPath string
+	// bearerToken is the hex-encoded shared secret expected in Authorization
+	// headers. Empty string disables auth.
+	bearerToken string
 }
 
 var (
@@ -106,6 +117,9 @@ func NewReceiver(cfg ReceiverConfig) (*Receiver, error) {
 		alertsPath:  alertsPathFor(cfg.SubscriberID),
 		metricsPath: metricsPathFor(cfg.SubscriberID),
 	}
+	if len(cfg.SharedSecret) > 0 {
+		r.bearerToken = hex.EncodeToString(cfg.SharedSecret)
+	}
 	r.buildMux()
 	r.srv = &http.Server{
 		Addr:              cfg.Addr,
@@ -130,6 +144,27 @@ func (r *Receiver) buildMux() {
 
 // Handler returns the underlying ServeMux. Used in tests to avoid binding a port.
 func (r *Receiver) Handler() http.Handler { return r.mux }
+
+// BearerToken returns the hex-encoded shared secret configured for this
+// receiver, or empty string when auth is disabled. Used by push.AddTo to
+// populate SubscriptionHeaders on the subscription reconciler so BMCs include
+// the token in their event POSTs.
+func (r *Receiver) BearerToken() string { return r.bearerToken }
+
+// checkAuth verifies the Authorization: Bearer header when SharedSecret is set.
+// Returns true when the request is authorized (or auth is disabled).
+// Writes 401 and returns false when the token is missing or wrong.
+func (r *Receiver) checkAuth(w http.ResponseWriter, req *http.Request) bool {
+	if r.bearerToken == "" {
+		return true
+	}
+	got := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
+	if subtle.ConstantTimeCompare([]byte(got), []byte(r.bearerToken)) != 1 {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
 
 // SetOnResourceRemoved wires the ResourceRemoved callback after construction.
 // Called by the push reconciler once it is set up.
@@ -187,6 +222,9 @@ func (r *Receiver) handleMetricReport(w http.ResponseWriter, req *http.Request) 
 		http.Error(w, "Only POST is allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if !r.checkAuth(w, req) {
+		return
+	}
 	bmcName := bmcNameFrom(req.URL.Path, r.metricsPath)
 	if bmcName == "" {
 		http.Error(w, "Missing BMC name in URL", http.StatusBadRequest)
@@ -224,6 +262,9 @@ func (r *Receiver) handleMetricReport(w http.ResponseWriter, req *http.Request) 
 func (r *Receiver) handleAlerts(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {
 		http.Error(w, "Only POST is allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !r.checkAuth(w, req) {
 		return
 	}
 	bmcName := bmcNameFrom(req.URL.Path, r.alertsPath)

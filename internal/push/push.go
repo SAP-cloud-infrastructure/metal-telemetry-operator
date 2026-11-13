@@ -4,6 +4,7 @@
 package push
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/go-logr/logr"
@@ -29,6 +30,13 @@ type Options struct {
 	ConfigName string
 	// ConfigNamespace is the namespace of the ConfigMap.
 	ConfigNamespace string
+	// SharedSecretName, when non-empty, names a Kubernetes Secret (in ConfigNamespace)
+	// that holds a 32-byte shared key used to authenticate incoming Redfish event POSTs.
+	// The Secret is created automatically on first start if it does not exist.
+	// When set, BMCs must include "Authorization: Bearer <hex(key)>" in every event POST;
+	// the same token is threaded into Redfish subscription HttpHeaders automatically.
+	// When empty, the receiver accepts unauthenticated POSTs (backward compatible).
+	SharedSecretName string
 	// Sink is an optional pre-built MetricReportSink. When set, AddTo uses it
 	// instead of creating a new one. Inject a shared instance from main.go to
 	// avoid duplicate Prometheus gauge registration when the SSE path is also enabled.
@@ -64,9 +72,22 @@ func AddTo(mgr ctrl.Manager, opts *Options) error {
 		}
 	}
 
+	var sharedSecret []byte
+	if opts.SharedSecretName != "" {
+		if opts.ConfigNamespace == "" {
+			return fmt.Errorf("push receiver shared secret requires ConfigNamespace to be set")
+		}
+		k, err := ensureHMACKey(context.Background(), mgr.GetClient(), opts.ConfigNamespace, opts.SharedSecretName)
+		if err != nil {
+			return fmt.Errorf("provision push receiver shared secret: %w", err)
+		}
+		sharedSecret = k
+	}
+
 	receiver, err := NewReceiver(ReceiverConfig{
 		Addr:         opts.EventsAddr,
 		SubscriberID: opts.SubscriberID,
+		SharedSecret: sharedSecret,
 		Sink:         s,
 		Log:          log.WithName("receiver"),
 	})
@@ -81,11 +102,17 @@ func AddTo(mgr ctrl.Manager, opts *Options) error {
 		receiver.SetEventSink(opts.EventSink)
 	}
 
-	reconciler := NewSubscriptionReconciler(mgr.GetClient(), ReconcilerConfig{
+	reconcilerCfg := ReconcilerConfig{
 		ReceiverURL:  opts.ReceiverURL,
 		SubscriberID: opts.SubscriberID,
 		Log:          log.WithName("reconciler"),
-	})
+	}
+	if len(sharedSecret) > 0 {
+		reconcilerCfg.SubscriptionHeaders = map[string]string{
+			"Authorization": "Bearer " + receiver.BearerToken(),
+		}
+	}
+	reconciler := NewSubscriptionReconciler(mgr.GetClient(), reconcilerCfg)
 
 	// The subscription reconciler tracks in-flight test events and implements
 	// ConsumeIfTest; wire it unconditionally so the receiver can filter them.
