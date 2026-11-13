@@ -44,9 +44,9 @@
 
 ## 9. Integration verification
 
-- [ ] 9.1 Deploy to QA cluster (`m-qa-de-100`) via Helm and verify `BMCTelemetry` resources appear for all BMCs: `kubectl get bmctelemetry -n metal-operator-system` shows `Mode=SSE` for Dell and Lenovo nodes and `Mode=Unsupported` for HPE/Fsas/BULL nodes
-- [ ] 9.2 Verify `redfish_telemetry_reading` metrics are present in Prometheus by querying `count by (hostname) (redfish_telemetry_reading)` — confirm at least one time series per connected BMC appears within 20 minutes of deployment (Lenovo's maximum batch interval)
-- [ ] 9.3 Confirm `redfish_telemetry_reading` and `redfish_monitor_reading` coexist in Prometheus without label collision and both scrape targets are healthy
+- [x] 9.1 Deploy to QA cluster (`m-qa-de-100`) via Helm and verify `BMCTelemetry` resources appear for all BMCs: `kubectl get bmctelemetry -n metal-operator-system` shows `Mode=SSE` for Dell and Lenovo nodes and `Mode=Unsupported` for HPE/Fsas/BULL nodes
+- [x] 9.2 Verify `redfish_telemetry_reading` metrics are present in Prometheus by querying `count by (hostname) (redfish_telemetry_reading)` — confirm at least one time series per connected BMC appears within 20 minutes of deployment (Lenovo's maximum batch interval)
+- [x] 9.3 Confirm `redfish_telemetry_reading` and `redfish_monitor_reading` coexist in Prometheus without label collision and both scrape targets are healthy
 
 ## Workflow follow-up
 

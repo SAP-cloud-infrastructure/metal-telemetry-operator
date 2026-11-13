@@ -146,13 +146,14 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := (&controller.BMCReconciler{
+	bmcReconciler := &controller.BMCReconciler{
 		Client:                mgr.GetClient(),
 		Scheme:                mgr.GetScheme(),
 		MaxConcurrentConnects: maxConcurrentConnects,
 		ConfigLoader:          pushLoader,
 		Sink:                  sharedSink,
-	}).SetupWithManager(mgr); err != nil {
+	}
+	if err := bmcReconciler.SetupWithManager(mgr); err != nil {
 		setupLog.Error(err, "Failed to create controller", "controller", "BMC")
 		os.Exit(1)
 	}
@@ -165,6 +166,7 @@ func main() {
 			ConfigName:      pushConfigName,
 			ConfigNamespace: pushConfigNamespace,
 			Sink:            sharedSink,
+			StatusWriter:    bmcReconciler,
 		}); err != nil {
 			setupLog.Error(err, "Failed to set up push pipeline")
 			os.Exit(1)

@@ -19,6 +19,11 @@ import (
 
 const testStandardSSEURI = "/redfish/v1/SSE"
 
+const (
+	testUsername = "user"
+	testPassword = "pass"
+)
+
 // blockingSSEServer returns a test TLS server that holds SSE connections open until
 // the request context is cancelled.
 func blockingSSEServer(t *testing.T) (host string, shutdown func()) {
@@ -43,8 +48,8 @@ func TestConnectionManager_StopBMC_stopsBothStreams(t *testing.T) {
 	baseCfg := sse.ConnConfig{
 		BMCName:  "bmc1",
 		Host:     host,
-		Username: "user",
-		Password: "pass",
+		Username: testUsername,
+		Password: testPassword,
 		Vendor: sse.VendorConfig{
 			Mode:   sse.ModeSSE,
 			SSEURI: testStandardSSEURI,
@@ -77,6 +82,80 @@ func TestConnectionManager_StopBMC_stopsBothStreams(t *testing.T) {
 	}
 }
 
+func TestConnectionManager_StreamKinds_UseDistinctURLs(t *testing.T) {
+	urlCh := make(chan string, 2)
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		urlCh <- r.URL.RequestURI()
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	host := strings.TrimPrefix(srv.URL, "https://")
+
+	mgr := sse.NewConnectionManager(10, nil, nil, logr.Discard())
+
+	vendor := sse.VendorConfig{
+		Mode:   sse.ModeSSE,
+		SSEURI: testStandardSSEURI,
+	}
+
+	if err := mgr.Ensure(context.Background(), sse.ConnConfig{
+		BMCName:    "bmc-urltest",
+		Host:       host,
+		Username:   testUsername,
+		Password:   testPassword,
+		Vendor:     vendor,
+		StreamKind: telemetryv1alpha1.StreamKindMetrics,
+	}); err != nil {
+		t.Fatalf("Ensure metrics: %v", err)
+	}
+	if err := mgr.Ensure(context.Background(), sse.ConnConfig{
+		BMCName:    "bmc-urltest",
+		Host:       host,
+		Username:   testUsername,
+		Password:   testPassword,
+		Vendor:     vendor,
+		StreamKind: telemetryv1alpha1.StreamKindAlerts,
+	}); err != nil {
+		t.Fatalf("Ensure alerts: %v", err)
+	}
+
+	// Collect two URL paths — each SSE goroutine dials the server once.
+	seen := make([]string, 0, 2)
+	timeout := time.After(5 * time.Second)
+	for len(seen) < 2 {
+		select {
+		case u := <-urlCh:
+			seen = append(seen, u)
+		case <-timeout:
+			t.Fatalf("timed out waiting for 2 SSE connections; received so far: %v", seen)
+		}
+	}
+	mgr.StopBMC("bmc-urltest")
+
+	var metricsURL, alertsURL string
+	for _, u := range seen {
+		if strings.Contains(u, "MetricReport") {
+			metricsURL = u
+		} else {
+			alertsURL = u
+		}
+	}
+	if metricsURL == "" {
+		t.Errorf("no MetricReport-filtered URL; got: %v", seen)
+	}
+	if alertsURL == "" {
+		t.Errorf("no Event-filtered (alerts) URL; got: %v", seen)
+	}
+	if metricsURL == alertsURL {
+		t.Errorf("expected distinct URLs; both: %s", metricsURL)
+	}
+}
+
 func TestConnectionManager_StopBMC_leavesOtherBMC(t *testing.T) {
 	host, shutdown := blockingSSEServer(t)
 	defer shutdown()
@@ -89,8 +168,8 @@ func TestConnectionManager_StopBMC_leavesOtherBMC(t *testing.T) {
 		return sse.ConnConfig{
 			BMCName:    bmc,
 			Host:       host,
-			Username:   "user",
-			Password:   "pass",
+			Username:   testUsername,
+			Password:   testPassword,
 			Vendor:     sse.VendorConfig{Mode: sse.ModeSSE, SSEURI: testStandardSSEURI},
 			StreamKind: kind,
 		}

@@ -99,7 +99,12 @@ func (c *sseConn) run(ctx context.Context) {
 }
 
 func (c *sseConn) stream(ctx context.Context) error {
-	url := c.cfg.Vendor.SSEURL()
+	var url string
+	if c.cfg.StreamKind == telemetryv1alpha1.StreamKindAlerts {
+		url = c.cfg.Vendor.AlertSSEURL()
+	} else {
+		url = c.cfg.Vendor.SSEURL()
+	}
 	// If the SSEURI is a path, prepend the host.
 	if strings.HasPrefix(url, "/") {
 		url = fmt.Sprintf("https://%s%s", c.cfg.Host, url)

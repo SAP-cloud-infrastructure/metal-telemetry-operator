@@ -77,10 +77,51 @@ The receiver's listen address, external URL, subscriber ID, and ConfigMap coordi
 ### Requirement: BMCTelemetry status updated on push activity
 The system SHALL update `BMCTelemetryStatus.LastEventTime` when MetricReport data is successfully received from a BMC, and SHALL update `BMCTelemetryStatus.ConnectionState` when a subscription is created, lost, or re-created.
 
-#### Scenario: LastEventTime set after successful receive
-- **WHEN** a MetricReport POST is processed and samples are published for a BMC
-- **THEN** the system updates `BMCTelemetryStatus.LastEventTime` for that BMC
+#### Scenario: LastEventTime updated on MetricReport POST
+- **WHEN** the push receiver processes a valid MetricReport POST for a BMC
+- **THEN** `BMCTelemetryStatus.LastEventTime` on the corresponding metrics BMCTelemetry resource is set to the current time
 
-#### Scenario: ConnectionState reflects subscription loss
-- **WHEN** a subscription is terminated (e.g. ResourceRemoved received) and re-creation has not yet completed
-- **THEN** `BMCTelemetryStatus.ConnectionState` reflects the disconnected state
+#### Scenario: LastEventTime updated on alert POST
+- **WHEN** the push receiver processes a non-ResourceRemoved alert event POST for a BMC
+- **THEN** `BMCTelemetryStatus.LastEventTime` on the corresponding alerts BMCTelemetry resource is set to the current time
+
+#### Scenario: LastEventTime not updated for ResourceRemoved alerts
+- **WHEN** the push receiver processes an alert POST whose MessageId indicates ResourceRemoved
+- **THEN** `BMCTelemetryStatus.LastEventTime` is NOT updated (the event triggers re-subscription, not a data receipt timestamp)
+
+### Requirement: Alert events update alerts stream status
+The system SHALL update `LastEventTime` on the `{bmc-name}-alerts` BMCTelemetry resource when a non-ResourceRemoved alert event POST is received from a BMC.
+
+#### Scenario: Alert POST updates alerts stream LastEventTime
+- **WHEN** a BMC POSTs a Redfish Event payload that is not a ResourceRemoved event
+- **THEN** the system updates `LastEventTime` on the `{bmc-name}-alerts` BMCTelemetry resource for that BMC
+
+#### Scenario: ResourceRemoved alert does not update LastEventTime
+- **WHEN** a BMC POSTs an alert event with a ResourceRemoved MessageId
+- **THEN** the system triggers re-subscription but does NOT update `LastEventTime` on the alerts stream resource
+
+### Requirement: Subscription slot exhaustion handled gracefully
+When a BMC returns HTTP 409 with a `ResourceInUse` or `EventSubscriptionLimitExceeded` message during subscription creation, the system SHALL set `ConnectionState` to `SlotsFull` on the affected stream resource and requeue after a long backoff of approximately 10 minutes.
+
+#### Scenario: 409 ResourceInUse sets SlotsFull and backs off
+- **WHEN** `CreateEventSubscription` returns HTTP 409 with a `ResourceInUse` message
+- **THEN** the system sets `ConnectionState: SlotsFull` on the affected stream resource and does not retry within the current reconcile cycle
+
+#### Scenario: SlotsFull BMC is requeued after long backoff
+- **WHEN** the subscription reconciler has set `ConnectionState: SlotsFull` on a stream resource
+- **THEN** the system requeues that BMC for reconcile after approximately 10 minutes
+
+#### Scenario: SlotsFull applies per stream, not per BMC
+- **WHEN** only the MetricReport subscription slot is exhausted
+- **THEN** `SlotsFull` is set on `{bmc-name}-metrics` only; the alerts stream state is set independently
+
+### Requirement: Push pipeline shares Prometheus sink with SSE pipeline
+The system SHALL register the `redfish_telemetry_reading` Prometheus gauge exactly once across both the SSE and push/MetricReport collection paths, so the operator starts without error when both SSE-mode and MetricReport-mode BMCs are present.
+
+#### Scenario: Operator starts with both SSE and MetricReport BMCs
+- **WHEN** the operator starts with `--push-receiver-url` configured and SSE-capable BMCs exist
+- **THEN** the operator starts without error and both the SSE and push receiver paths publish samples to the same `redfish_telemetry_reading` gauge
+
+#### Scenario: Forget on mode transition cleans up all series
+- **WHEN** a BMC transitions from MetricReport mode to SSE mode (or the reverse) and `Forget` is called for that BMC
+- **THEN** all `redfish_telemetry_reading` gauge series for that BMC are deleted, regardless of which collection path originally wrote them

@@ -90,7 +90,7 @@ func (f *fakeStatusWriter) recordedAlerts() []string {
 }
 
 // minimalMetricReport builds a minimal MetricReport JSON with one MetricValue.
-func minimalMetricReport(metricID, value string) []byte {
+func minimalMetricReport(value string) []byte {
 	type mv struct {
 		MetricID    string `json:"MetricID"`
 		MetricValue string `json:"MetricValue"`
@@ -100,7 +100,7 @@ func minimalMetricReport(metricID, value string) []byte {
 		MetricValues []mv `json:"MetricValues"`
 	}
 	raw, _ := json.Marshal(mr{MetricValues: []mv{{
-		MetricID:    metricID,
+		MetricID:    "CPU.Percent",
 		MetricValue: value,
 		Timestamp:   time.Now().UTC().Format(time.RFC3339),
 	}}})
@@ -154,7 +154,7 @@ func TestHandleMetricReport_dispatches_samples(t *testing.T) {
 	fs := &fakeSink{}
 	r := newTestReceiver(t, "sub1", fs)
 
-	body := minimalMetricReport("CPU.Percent", "42")
+	body := minimalMetricReport("42")
 	req := httptest.NewRequest(http.MethodPost, "/serverevents/sub1/metricsreport/node42", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	r.Handler().ServeHTTP(w, req)
@@ -180,7 +180,7 @@ func TestHandleMetricReport_statusWriter_called(t *testing.T) {
 	r := newTestReceiver(t, "sub1", fs)
 	r.SetStatusWriter(sw)
 
-	body := minimalMetricReport("CPU.Percent", "42")
+	body := minimalMetricReport("42")
 	req := httptest.NewRequest(http.MethodPost, "/serverevents/sub1/metricsreport/node99", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	r.Handler().ServeHTTP(w, req)
@@ -198,7 +198,7 @@ func TestHandleMetricReport_noSubscriberID(t *testing.T) {
 	fs := &fakeSink{}
 	r := newTestReceiver(t, "", fs)
 
-	body := minimalMetricReport("CPU.Percent", "1")
+	body := minimalMetricReport("1")
 	req := httptest.NewRequest(http.MethodPost, "/serverevents/metricsreport/node1", bytes.NewReader(body))
 	w := httptest.NewRecorder()
 	r.Handler().ServeHTTP(w, req)

@@ -15,7 +15,7 @@
 
 ## 4. End-to-end startup verification
 
-- [ ] 4.1 Run the operator locally (or in Tilt) with both `--push-receiver-url` set and at least one SSE-capable BMC present; confirm startup log shows no "duplicate metrics collector" error and `redfish_telemetry_reading` appears in `/metrics` — verify by `curl localhost:8080/metrics | grep redfish_telemetry_reading`
+- [x] 4.1 Run the operator locally (or in Tilt) with both `--push-receiver-url` set and at least one SSE-capable BMC present; confirm startup log shows no "duplicate metrics collector" error and `redfish_telemetry_reading` appears in `/metrics` — verify by `curl localhost:8080/metrics | grep redfish_telemetry_reading`
 
 ## Workflow follow-up
 

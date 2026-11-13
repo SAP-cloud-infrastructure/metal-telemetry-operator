@@ -33,6 +33,10 @@ type Options struct {
 	// instead of creating a new one. Inject a shared instance from main.go to
 	// avoid duplicate Prometheus gauge registration when the SSE path is also enabled.
 	Sink sink.MetricReportSink
+	// StatusWriter is notified when a MetricReport or alert POST arrives. When set,
+	// AddTo wires it to the push receiver so LastEventTime is updated on activity.
+	// Typically set to the BMCReconciler from main.go.
+	StatusWriter StatusWriter
 	// Log is the logger; defaults to the controller-runtime logger.
 	Log logr.Logger
 }
@@ -62,6 +66,10 @@ func AddTo(mgr ctrl.Manager, opts *Options) error {
 	})
 	if err != nil {
 		return fmt.Errorf("create push receiver: %w", err)
+	}
+
+	if opts.StatusWriter != nil {
+		receiver.SetStatusWriter(opts.StatusWriter)
 	}
 
 	reconciler := NewSubscriptionReconciler(mgr.GetClient(), ReconcilerConfig{

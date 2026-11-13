@@ -4,6 +4,8 @@
 package push_test
 
 import (
+	"bytes"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -12,6 +14,11 @@ import (
 
 	"github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/push"
 	prometheusSink "github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/sink/prometheus"
+)
+
+const (
+	testReceiverURL  = "http://localhost:9093"
+	testSubscriberID = "test"
 )
 
 // TestAddTo_InjectSink_AvoidsDuplicateRegistration verifies that AddTo uses the
@@ -53,9 +60,9 @@ func TestAddTo_InjectSink_AvoidsDuplicateRegistration(t *testing.T) {
 			}
 		}()
 		gotErr = push.AddTo(nil, &push.Options{
-			ReceiverURL:  "http://localhost:9093",
+			ReceiverURL:  testReceiverURL,
 			EventsAddr:   ":0",
-			SubscriberID: "test",
+			SubscriberID: testSubscriberID,
 			Sink:         &fakeSink{},
 		})
 	}()
@@ -86,9 +93,9 @@ func TestAddTo_NilSink_FailsOnDuplicate(t *testing.T) {
 	// Call AddTo with Sink == nil.  The fallback calls prometheusSink.New
 	// against ctrlmetrics.Registry and must return the duplicate error.
 	err := push.AddTo(nil, &push.Options{
-		ReceiverURL:  "http://localhost:9093",
+		ReceiverURL:  testReceiverURL,
 		EventsAddr:   ":0",
-		SubscriberID: "test",
+		SubscriberID: testSubscriberID,
 		Sink:         nil, // no injection
 	})
 	if err == nil {
@@ -115,5 +122,44 @@ func TestDuplicateRegistration_ProvesProblem(t *testing.T) {
 	}
 	if !strings.Contains(err2.Error(), "duplicate") {
 		t.Errorf("unexpected error text: %v", err2)
+	}
+}
+
+// TestAddTo_Options_StatusWriter_wiredToReceiver verifies that push.Options.StatusWriter,
+// when set, is wired to the receiver so that RecordMetricReport is called on incoming POSTs.
+// The test exercises the same SetStatusWriter call that AddTo makes.
+func TestAddTo_Options_StatusWriter_wiredToReceiver(t *testing.T) {
+	sw := &fakeStatusWriter{}
+	opts := &push.Options{
+		ReceiverURL:  testReceiverURL,
+		EventsAddr:   ":0",
+		SubscriberID: testSubscriberID,
+		Sink:         &fakeSink{},
+		StatusWriter: sw,
+	}
+
+	// Build a receiver the same way AddTo does, then wire StatusWriter from opts.
+	r, err := push.NewReceiver(push.ReceiverConfig{
+		Addr:         opts.EventsAddr,
+		SubscriberID: opts.SubscriberID,
+		Sink:         opts.Sink,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if opts.StatusWriter != nil {
+		r.SetStatusWriter(opts.StatusWriter)
+	}
+
+	body := minimalMetricReport("99")
+	req := httptest.NewRequest("POST", "/serverevents/test/metricsreport/node-sw", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	r.Handler().ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Errorf("status %d, want 200", w.Code)
+	}
+	if got := sw.recorded(); len(got) != 1 || got[0] != "node-sw" {
+		t.Errorf("RecordMetricReport called with %v, want [node-sw]", got)
 	}
 }
