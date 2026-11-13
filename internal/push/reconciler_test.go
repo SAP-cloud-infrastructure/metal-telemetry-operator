@@ -82,6 +82,8 @@ func (f *fakeRedfishClient) DeleteEventSubscription(_ context.Context, uri strin
 	return nil
 }
 
+func (f *fakeRedfishClient) SubmitTestEvent(_ context.Context, _ string) error { return nil }
+
 func (f *fakeRedfishClient) Close() {}
 
 type fakeFactory struct {
@@ -546,4 +548,92 @@ func containsStr(s, sub string) bool {
 		}
 		return false
 	}())
+}
+
+// ---------------------------------------------------------------------------
+// ConsumeIfTest tests
+// ---------------------------------------------------------------------------
+
+// fakeTestRecorder captures RecordTestResult calls.
+type fakeTestRecorder struct {
+	mu      sync.Mutex
+	results map[string]string // bmcName → last result
+}
+
+func (r *fakeTestRecorder) RecordTestResult(bmcName, result string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.results == nil {
+		r.results = make(map[string]string)
+	}
+	r.results[bmcName] = result
+}
+
+func (r *fakeTestRecorder) last(bmcName string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.results[bmcName]
+}
+
+func newReconcilerForTest(t *testing.T) (*push.SubscriptionReconciler, *fakeTestRecorder) {
+	t.Helper()
+	fc := fake.NewClientBuilder().WithScheme(newTestScheme(t)).Build()
+	rec := &fakeTestRecorder{}
+	r := push.NewSubscriptionReconciler(fc, push.ReconcilerConfig{
+		ReceiverURL:  "http://localhost:9093",
+		SubscriberID: "test",
+	})
+	r.TestRecorder = rec
+	return r, rec
+}
+
+func TestConsumeIfTest_ReturnsTrueForTrackedMessageId(t *testing.T) {
+	r, rec := newReconcilerForTest(t)
+
+	// Simulate what maybeRunTestEvent stores via a SubmitTestEvent round-trip.
+	// We call the exported ConsumeIfTest before any pending entry exists.
+	if r.ConsumeIfTest("bmc-a", "Base.1.0.TestMessage") {
+		t.Fatal("expected false for untracked bmc, got true")
+	}
+
+	// Seed a pending entry directly by calling the exported test helper.
+	r.SetTestPending("bmc-a", "Base.1.0.TestMessage", 30)
+
+	if !r.ConsumeIfTest("bmc-a", "Base.1.0.TestMessage") {
+		t.Fatal("expected true for tracked MessageId, got false")
+	}
+	if got := rec.last("bmc-a"); got != "success" {
+		t.Errorf("want result=success, got %q", got)
+	}
+	// Consuming again returns false (entry was deleted).
+	if r.ConsumeIfTest("bmc-a", "Base.1.0.TestMessage") {
+		t.Fatal("expected false after entry consumed, got true")
+	}
+}
+
+func TestConsumeIfTest_ReturnsFalseForUntrackedMessageId(t *testing.T) {
+	r, _ := newReconcilerForTest(t)
+	r.SetTestPending("bmc-b", "Base.1.0.TestMessage", 30)
+
+	// Wrong BMC.
+	if r.ConsumeIfTest("bmc-c", "Base.1.0.TestMessage") {
+		t.Fatal("expected false for wrong BMC, got true")
+	}
+	// Wrong MessageId.
+	if r.ConsumeIfTest("bmc-b", "Base.1.0.Other") {
+		t.Fatal("expected false for wrong MessageId, got true")
+	}
+}
+
+func TestConsumeIfTest_RecordsTimeoutWhenDeadlineExpired(t *testing.T) {
+	r, rec := newReconcilerForTest(t)
+	// Set deadline in the past (negative seconds).
+	r.SetTestPending("bmc-d", "Base.1.0.TestMessage", -1)
+
+	if !r.ConsumeIfTest("bmc-d", "Base.1.0.TestMessage") {
+		t.Fatal("expected true, got false")
+	}
+	if got := rec.last("bmc-d"); got != "timeout" {
+		t.Errorf("want result=timeout, got %q", got)
+	}
 }

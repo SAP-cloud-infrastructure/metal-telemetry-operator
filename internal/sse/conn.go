@@ -33,6 +33,12 @@ type ConnConfig struct {
 	Password   string
 	Vendor     VendorConfig
 	StreamKind telemetryv1alpha1.StreamKind
+	// EventSink receives decoded Redfish alert events from the alerts SSE stream.
+	// If nil, alert events are silently discarded.
+	EventSink sink.EventSink
+	// TestFilter identifies and consumes in-flight SubmitTestEvent heartbeats.
+	// If nil, all events are treated as real hardware events.
+	TestFilter ConsumeIfTest
 }
 
 // StatusWriter updates BMCTelemetry status from the SSE goroutine.
@@ -45,24 +51,28 @@ type StatusWriter interface {
 
 // sseConn manages one long-lived SSE connection to a BMC.
 type sseConn struct {
-	cfg    ConnConfig
-	sink   sink.MetricReportSink
-	sw     StatusWriter
-	log    logr.Logger
-	cancel context.CancelFunc
-	done   chan struct{}
+	cfg        ConnConfig
+	sink       sink.MetricReportSink
+	sw         StatusWriter
+	eventSink  sink.EventSink
+	testFilter ConsumeIfTest
+	log        logr.Logger
+	cancel     context.CancelFunc
+	done       chan struct{}
 }
 
 // start launches the SSE goroutine. Call stop() to terminate it.
 func startConn(ctx context.Context, cfg ConnConfig, s sink.MetricReportSink, sw StatusWriter) *sseConn {
 	connCtx, cancel := context.WithCancel(ctx)
 	c := &sseConn{
-		cfg:    cfg,
-		sink:   s,
-		sw:     sw,
-		log:    logr.FromContextOrDiscard(ctx).WithValues("bmc", cfg.BMCName),
-		cancel: cancel,
-		done:   make(chan struct{}),
+		cfg:        cfg,
+		sink:       s,
+		sw:         sw,
+		eventSink:  cfg.EventSink,
+		testFilter: cfg.TestFilter,
+		log:        logr.FromContextOrDiscard(ctx).WithValues("bmc", cfg.BMCName),
+		cancel:     cancel,
+		done:       make(chan struct{}),
 	}
 	go c.run(connCtx)
 	return c
@@ -175,21 +185,60 @@ func (c *sseConn) handleEvent(ctx context.Context, data string, lastEvent *time.
 	if err := json.Unmarshal([]byte(data), &env); err != nil {
 		return
 	}
-	// Only process MetricReport events; silently discard others (e.g. #Event.*).
-	if !strings.HasPrefix(env.ODataType, "#MetricReport.") {
+
+	if strings.HasPrefix(env.ODataType, "#MetricReport.") {
+		samples, err := ParseMetricReport([]byte(data))
+		if err != nil {
+			c.log.Error(err, "Failed to parse MetricReport")
+			return
+		}
+		if len(samples) == 0 {
+			return
+		}
+		if err := c.sink.PublishSamples(ctx, c.cfg.BMCName, samples); err != nil {
+			c.log.Error(err, "Failed to publish samples")
+			return
+		}
+		now := time.Now()
+		// Rate-limit status updates to once per minute to reduce API server load.
+		if c.sw != nil && now.Sub(*lastEvent) >= time.Minute {
+			_ = c.sw.SetLastEventTime(ctx, c.cfg.BMCName, c.cfg.StreamKind, now)
+			*lastEvent = now
+		}
 		return
 	}
 
-	samples, err := ParseMetricReport([]byte(data))
-	if err != nil {
-		c.log.Error(err, "Failed to parse MetricReport")
+	if c.cfg.StreamKind == telemetryv1alpha1.StreamKindAlerts && strings.HasPrefix(env.ODataType, "#Event.") {
+		c.handleAlertEvent(ctx, data, lastEvent)
+	}
+	// All other event types are silently discarded.
+}
+
+func (c *sseConn) handleAlertEvent(ctx context.Context, data string, lastEvent *time.Time) {
+	var env alertEnvelope
+	if err := json.Unmarshal([]byte(data), &env); err != nil {
+		c.log.Error(err, "Failed to parse alert event")
 		return
 	}
-	if len(samples) == 0 {
+	events := env.flatten()
+	if len(events) == 0 {
 		return
 	}
-	if err := c.sink.PublishSamples(ctx, c.cfg.BMCName, samples); err != nil {
-		c.log.Error(err, "Failed to publish samples")
+
+	real := events[:0]
+	for _, e := range events {
+		if c.testFilter != nil && c.testFilter.ConsumeIfTest(c.cfg.BMCName, e.MessageID) {
+			continue
+		}
+		real = append(real, e)
+	}
+
+	if len(real) == 0 || c.eventSink == nil {
+		return
+	}
+
+	if err := c.eventSink.PublishEvents(ctx, c.cfg.BMCName, real); err != nil {
+		c.log.Error(err, "Failed to publish alert events")
 		return
 	}
 

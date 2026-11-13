@@ -43,10 +43,9 @@ func TestConnectionManager_StopBMC_stopsBothStreams(t *testing.T) {
 	host, shutdown := blockingSSEServer(t)
 	defer shutdown()
 
-	mgr := sse.NewConnectionManager(10, nil, nil, logr.Discard())
+	mgr := sse.NewConnectionManager(10, nil, nil, nil, nil, logr.Discard())
 
 	baseCfg := sse.ConnConfig{
-		BMCName:  "bmc1",
 		Host:     host,
 		Username: testUsername,
 		Password: testPassword,
@@ -96,7 +95,7 @@ func TestConnectionManager_StreamKinds_UseDistinctURLs(t *testing.T) {
 	defer srv.Close()
 	host := strings.TrimPrefix(srv.URL, "https://")
 
-	mgr := sse.NewConnectionManager(10, nil, nil, logr.Discard())
+	mgr := sse.NewConnectionManager(10, nil, nil, nil, nil, logr.Discard())
 
 	vendor := sse.VendorConfig{
 		Mode:   sse.ModeSSE,
@@ -162,7 +161,7 @@ func TestConnectionManager_StopBMC_leavesOtherBMC(t *testing.T) {
 
 	// Use maxConcurrent=3: 2 for bmc1, 1 for bmc2.
 	// If StopBMC("bmc1") leaks slots, the final Ensure for bmc1 will deadlock.
-	mgr := sse.NewConnectionManager(3, nil, nil, logr.Discard())
+	mgr := sse.NewConnectionManager(3, nil, nil, nil, nil, logr.Discard())
 
 	makeCfg := func(bmc string, kind telemetryv1alpha1.StreamKind) sse.ConnConfig {
 		return sse.ConnConfig{

@@ -166,6 +166,7 @@ func main() {
 			ConfigName:      pushConfigName,
 			ConfigNamespace: pushConfigNamespace,
 			Sink:            sharedSink,
+			EventSink:       bmcReconciler.AlertEventSink,
 			StatusWriter:    bmcReconciler,
 		}); err != nil {
 			setupLog.Error(err, "Failed to set up push pipeline")

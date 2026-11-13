@@ -23,3 +23,23 @@ type MetricReportSink interface {
 	PublishSamples(ctx context.Context, bmcName string, samples []Sample) error
 	Forget(bmcName string)
 }
+
+// Event is one decoded Redfish alert event. Wire-level vendor quirks (Redfish
+// v1.5 field renames, Dell iDRAC plain-string OriginOfCondition) are resolved
+// by the push wire decoder before reaching a sink.
+type Event struct {
+	EventID           string
+	MessageID         string
+	Message           string
+	Severity          string
+	EventTimestamp    string
+	OriginOfCondition string
+}
+
+// EventSink consumes a batch of alert events from one BMC. Implementations
+// must be safe for concurrent use. The same EventID may appear in successive
+// batches while the event is active — counting sinks deduplicate.
+type EventSink interface {
+	PublishEvents(ctx context.Context, bmcName string, events []Event) error
+	Forget(bmcName string)
+}

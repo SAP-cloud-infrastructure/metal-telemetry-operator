@@ -35,6 +35,15 @@ type StatusWriter interface {
 	RecordAlertEvent(ctx context.Context, bmcName string)
 }
 
+// ConsumeIfTest checks whether the given messageId corresponds to an
+// in-flight test event for the named BMC. If it does, the implementation
+// records the round-trip health metric and returns true; the caller must
+// not route the event to the alert pipeline. Returns false for real
+// hardware events.
+type ConsumeIfTest interface {
+	ConsumeIfTest(bmcName, messageId string) bool
+}
+
 // ReceiverConfig holds all parameters for constructing a Receiver.
 type ReceiverConfig struct {
 	// Addr is the listen address, e.g. ":9093". Required.
@@ -44,6 +53,10 @@ type ReceiverConfig struct {
 	SubscriberID string
 	// Sink receives decoded MetricReport samples. Required.
 	Sink sink.MetricReportSink
+	// EventSink receives decoded alert events. May be nil.
+	EventSink sink.EventSink
+	// TestFilter identifies and consumes in-flight test heartbeat events. May be nil.
+	TestFilter ConsumeIfTest
 	// StatusWriter is notified when a MetricReport POST arrives. May be nil.
 	StatusWriter StatusWriter
 	// OnResourceRemoved is called when an alert event indicates that a push
@@ -129,6 +142,16 @@ func (r *Receiver) SetStatusWriter(sw StatusWriter) {
 	r.cfg.StatusWriter = sw
 }
 
+// SetEventSink wires the EventSink after construction.
+func (r *Receiver) SetEventSink(es sink.EventSink) {
+	r.cfg.EventSink = es
+}
+
+// SetTestFilter wires the ConsumeIfTest filter after construction.
+func (r *Receiver) SetTestFilter(tf ConsumeIfTest) {
+	r.cfg.TestFilter = tf
+}
+
 // Start listens on cfg.Addr and serves until ctx is cancelled.
 // Implements manager.Runnable.
 func (r *Receiver) Start(ctx context.Context) error {
@@ -198,13 +221,6 @@ func (r *Receiver) handleMetricReport(w http.ResponseWriter, req *http.Request) 
 	w.WriteHeader(http.StatusOK)
 }
 
-// alertEvent is the minimal Redfish alert event we decode to detect ResourceRemoved.
-type alertEvent struct {
-	Events []struct {
-		MessageID string `json:"MessageId"`
-	} `json:"Events"`
-}
-
 func (r *Receiver) handleAlerts(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {
 		http.Error(w, "Only POST is allowed", http.StatusMethodNotAllowed)
@@ -222,22 +238,38 @@ func (r *Receiver) handleAlerts(w http.ResponseWriter, req *http.Request) {
 	}
 	r.log.V(2).Info("Received alert POST", "bmc", bmcName, "bytes", len(body))
 
-	var env alertEvent
+	var env eventEnvelope
 	if err := json.Unmarshal(body, &env); err != nil {
 		r.log.V(1).Info("Failed to parse alert payload", "bmc", bmcName, "err", err.Error())
-	} else {
-		resourceRemoved := false
-		for _, ev := range env.Events {
-			if isResourceRemoved(ev.MessageID) {
-				r.log.Info("ResourceRemoved event detected, triggering re-subscribe", "bmc", bmcName)
-				if r.cfg.OnResourceRemoved != nil {
-					r.cfg.OnResourceRemoved(bmcName)
-				}
-				resourceRemoved = true
-				break
+		w.WriteHeader(http.StatusOK)
+		return
+	}
+
+	var realEvents []sink.Event
+	for _, ev := range env.flatten() {
+		if isResourceRemoved(ev.MessageID) {
+			r.log.Info("ResourceRemoved event detected, triggering re-subscribe", "bmc", bmcName)
+			if r.cfg.OnResourceRemoved != nil {
+				r.cfg.OnResourceRemoved(bmcName)
+			}
+			// ResourceRemoved: skip all further processing for this POST.
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		if r.cfg.TestFilter != nil && r.cfg.TestFilter.ConsumeIfTest(bmcName, ev.MessageID) {
+			r.log.V(2).Info("Consumed test event", "bmc", bmcName, "messageId", ev.MessageID)
+			continue
+		}
+		realEvents = append(realEvents, ev)
+	}
+
+	if len(realEvents) > 0 {
+		if r.cfg.EventSink != nil {
+			if err := r.cfg.EventSink.PublishEvents(req.Context(), bmcName, realEvents); err != nil {
+				r.log.Error(err, "Alert event sink publish failed", "bmc", bmcName)
 			}
 		}
-		if !resourceRemoved && r.cfg.StatusWriter != nil {
+		if r.cfg.StatusWriter != nil {
 			r.cfg.StatusWriter.RecordAlertEvent(req.Context(), bmcName)
 		}
 	}

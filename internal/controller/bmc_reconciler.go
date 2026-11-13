@@ -5,17 +5,22 @@ package controller
 
 // +kubebuilder:rbac:groups=metal.ironcore.dev,resources=bmcs,verbs=get;list;watch
 // +kubebuilder:rbac:groups=metal.ironcore.dev,resources=bmcsecrets,verbs=get;list;watch
+// +kubebuilder:rbac:groups=metal.ironcore.dev,resources=servers,verbs=get;list;watch
+// +kubebuilder:rbac:groups=metal.ironcore.dev,resources=servers/status,verbs=get;patch
 // +kubebuilder:rbac:groups=telemetry.metal.ironcore.dev,resources=bmctelemetries,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=telemetry.metal.ironcore.dev,resources=bmctelemetries/finalizers,verbs=update
 // +kubebuilder:rbac:groups=telemetry.metal.ironcore.dev,resources=bmctelemetries/status,verbs=get;update;patch
+// +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -23,11 +28,14 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	ctrlmetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	metalv1alpha1 "github.com/ironcore-dev/metal-operator/api/v1alpha1"
 
 	telemetryv1alpha1 "github.com/SAP-cloud-infrastructure/metal-telemetry-operator/api/v1alpha1"
+	"github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/alert/criticalevent"
+	"github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/alert/warningevent"
 	"github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/push"
 	"github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/sink"
 	prometheusSink "github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/sink/prometheus"
@@ -52,9 +60,16 @@ type BMCReconciler struct {
 	// also enabled.
 	Sink sink.MetricReportSink
 
-	initOnce sync.Once
-	connMgr  *sse.ConnectionManager
-	sinkInst sink.MetricReportSink
+	// AlertEventSink receives decoded Redfish alert events. When nil,
+	// SetupWithManager creates a Prometheus-backed one wired to the critical and
+	// warning handlers. main.go reads this after SetupWithManager to pass it to
+	// push.AddTo.
+	AlertEventSink sink.EventSink
+
+	initOnce        sync.Once
+	connMgr         *sse.ConnectionManager
+	sinkInst        sink.MetricReportSink
+	criticalHandler *criticalevent.ConditionHandler
 }
 
 // SetupWithManager initializes the reconciler and registers it with the manager.
@@ -71,15 +86,78 @@ func (r *BMCReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			}
 		}
 		r.sinkInst = s
+
+		alertGauge := criticalevent.NewCriticalAlertGauge()
+		if regErr := ctrlmetrics.Registry.Register(alertGauge); regErr != nil {
+			var are prometheus.AlreadyRegisteredError
+			if !errors.As(regErr, &are) {
+				initErr = fmt.Errorf("register critical alert gauge: %w", regErr)
+				return
+			}
+			alertGauge = are.ExistingCollector.(*prometheus.GaugeVec)
+		}
+		r.criticalHandler = &criticalevent.ConditionHandler{
+			Client:     r.Client,
+			Log:        mgr.GetLogger().WithName("criticalevent"),
+			AlertGauge: alertGauge,
+		}
+
+		warningHandler := &warningevent.Handler{
+			Client:        r.Client,
+			Log:           mgr.GetLogger().WithName("warningevent"),
+			EventRecorder: mgr.GetEventRecorder("bmc-telemetry"),
+		}
+
+		if r.AlertEventSink == nil {
+			es, esErr := prometheusSink.NewEventSinkWithLogger(
+				ctrlmetrics.Registry,
+				mgr.GetLogger().WithName("eventsink"),
+			)
+			if esErr != nil {
+				initErr = fmt.Errorf("create alert event sink: %w", esErr)
+				return
+			}
+			es.OnCritical = r.criticalHandler.HandleCritical
+			es.OnClear = r.criticalHandler.HandleClear
+			es.OnWarning = warningHandler.HandleWarning
+			r.AlertEventSink = es
+		}
+
 		r.connMgr = sse.NewConnectionManager(
 			int64(r.MaxConcurrentConnects),
 			s,
-			r, // BMCReconciler implements sse.StatusWriter
+			r,                // BMCReconciler implements sse.StatusWriter
+			r.AlertEventSink, // routes SSE alert events through the same pipeline as push
+			nil,              // TestFilter: SSE heartbeat not yet implemented
 			mgr.GetLogger().WithName("sse"),
 		)
 	})
 	if initErr != nil {
 		return initErr
+	}
+
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(),
+		&metalv1alpha1.Server{}, criticalevent.BMCRefField,
+		func(obj client.Object) []string {
+			server, ok := obj.(*metalv1alpha1.Server)
+			if !ok || server.Spec.BMCRef == nil {
+				return nil
+			}
+			return []string{server.Spec.BMCRef.Name}
+		}); err != nil {
+		return fmt.Errorf("index Server by %s: %w", criticalevent.BMCRefField, err)
+	}
+
+	if r.criticalHandler != nil {
+		h := r.criticalHandler
+		if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
+			if !mgr.GetCache().WaitForCacheSync(ctx) {
+				return nil
+			}
+			return prewarmAlertGauge(ctx, r.Client, h)
+		})); err != nil {
+			return fmt.Errorf("add alert gauge prewarm: %w", err)
+		}
 	}
 
 	return ctrl.NewControllerManagedBy(mgr).
@@ -471,3 +549,25 @@ func (r *BMCReconciler) RecordAlertEvent(ctx context.Context, bmcName string) {
 
 // Ensure BMCReconciler satisfies the push.StatusWriter interface at compile time.
 var _ push.StatusWriter = (*BMCReconciler)(nil)
+
+// prewarmAlertGauge restores the critical alert gauge state after a pod restart by
+// reading the CriticalEventReceived condition from every Server in the cache.
+func prewarmAlertGauge(ctx context.Context, c client.Client, handler *criticalevent.ConditionHandler) error {
+	serverList := &metalv1alpha1.ServerList{}
+	if err := c.List(ctx, serverList); err != nil {
+		return fmt.Errorf("list Servers: %w", err)
+	}
+	for i := range serverList.Items {
+		srv := &serverList.Items[i]
+		if srv.Spec.BMCRef == nil {
+			continue
+		}
+		cond := meta.FindStatusCondition(srv.Status.Conditions, criticalevent.CriticalEventConditionType)
+		if cond != nil && cond.Status == metav1.ConditionTrue {
+			handler.SetAlertGauge(srv.Spec.BMCRef.Name, 1)
+		} else if cond != nil {
+			handler.SetAlertGauge(srv.Spec.BMCRef.Name, 0)
+		}
+	}
+	return nil
+}

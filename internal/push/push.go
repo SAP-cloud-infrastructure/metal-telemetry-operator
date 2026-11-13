@@ -33,6 +33,12 @@ type Options struct {
 	// instead of creating a new one. Inject a shared instance from main.go to
 	// avoid duplicate Prometheus gauge registration when the SSE path is also enabled.
 	Sink sink.MetricReportSink
+	// EventSink receives decoded alert events. When set, AddTo wires it to the push
+	// receiver so alert events are routed through the full pipeline.
+	EventSink sink.EventSink
+	// TestFilter identifies and consumes in-flight test heartbeat events. When set,
+	// AddTo wires it to the push receiver.
+	TestFilter ConsumeIfTest
 	// StatusWriter is notified when a MetricReport or alert POST arrives. When set,
 	// AddTo wires it to the push receiver so LastEventTime is updated on activity.
 	// Typically set to the BMCReconciler from main.go.
@@ -71,12 +77,19 @@ func AddTo(mgr ctrl.Manager, opts *Options) error {
 	if opts.StatusWriter != nil {
 		receiver.SetStatusWriter(opts.StatusWriter)
 	}
+	if opts.EventSink != nil {
+		receiver.SetEventSink(opts.EventSink)
+	}
 
 	reconciler := NewSubscriptionReconciler(mgr.GetClient(), ReconcilerConfig{
 		ReceiverURL:  opts.ReceiverURL,
 		SubscriberID: opts.SubscriberID,
 		Log:          log.WithName("reconciler"),
 	})
+
+	// The subscription reconciler tracks in-flight test events and implements
+	// ConsumeIfTest; wire it unconditionally so the receiver can filter them.
+	receiver.SetTestFilter(reconciler)
 
 	receiver.SetOnResourceRemoved(reconciler.EnqueueBMC)
 

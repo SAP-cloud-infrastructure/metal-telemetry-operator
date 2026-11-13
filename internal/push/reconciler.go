@@ -13,6 +13,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -46,12 +47,19 @@ type Client interface {
 	CreateEventSubscription(ctx context.Context, destination, eventFormatType string) (string, error)
 	DeleteEventSubscription(ctx context.Context, uri string) error
 	ListEventSubscriptions(ctx context.Context) ([]Subscription, error)
+	SubmitTestEvent(ctx context.Context, messageId string) error
 	Close()
 }
 
 // ClientFactory creates Redfish clients for a given BMC.
 type ClientFactory interface {
 	NewClient(ctx context.Context, host, username, password string) (Client, error)
+}
+
+// TestResultRecorder records pipeline health-check results. Implemented by
+// the Prometheus test sink; may be nil to disable metric recording.
+type TestResultRecorder interface {
+	RecordTestResult(bmcName, result string)
 }
 
 // ReconcilerConfig holds all parameters for constructing a SubscriptionReconciler.
@@ -63,16 +71,29 @@ type ReconcilerConfig struct {
 	SubscriberID string
 	// Factory creates Redfish clients; defaults to the production HTTPS client.
 	Factory ClientFactory
-	Log     logr.Logger
+	// TestEventInterval is the cadence for health-check test events.
+	// Zero or negative disables the heartbeat.
+	TestEventInterval time.Duration
+	// TestEventMessageId is the Redfish MessageId sent for health-check test events.
+	// Defaults to "Base.1.0.TestMessage".
+	TestEventMessageId string
+	// TestEventTimeout is how long to wait for the test event to arrive back.
+	// Defaults to 30 seconds.
+	TestEventTimeout time.Duration
+	Log              logr.Logger
 }
 
 // SubscriptionReconciler watches BMC objects and maintains MetricReport push
 // subscriptions on MetricReport-mode BMCs.
 type SubscriptionReconciler struct {
 	client.Client
-	cfg      ReconcilerConfig
-	log      logr.Logger
-	eventsCh chan event.TypedGenericEvent[*metalv1alpha1.BMC]
+	cfg          ReconcilerConfig
+	log          logr.Logger
+	eventsCh     chan event.TypedGenericEvent[*metalv1alpha1.BMC]
+	testPending  sync.Map // bmcName → testEntry
+	lastTestTime sync.Map // bmcName → time.Time
+	// TestRecorder receives pipeline health-check results. May be nil.
+	TestRecorder TestResultRecorder
 }
 
 // NewSubscriptionReconciler constructs a SubscriptionReconciler ready for
@@ -233,6 +254,7 @@ func (r *SubscriptionReconciler) ensureSubscriptions(ctx context.Context, bmc *m
 		log.Info("Created alerts push subscription", "uri", uri)
 	}
 	r.setConnState(ctx, bmc.Name+"-alerts", telemetryv1alpha1.ConnectionStateSubscriptionActive)
+	r.maybeRunTestEvent(ctx, rc, bmc.Name)
 	return nil
 }
 
@@ -315,6 +337,85 @@ func (r *SubscriptionReconciler) fetchCredentials(ctx context.Context, bmc *meta
 		return "", "", fmt.Errorf("BMCSecret %q has empty username or password", key.Name)
 	}
 	return username, password, nil
+}
+
+// ---------------------------------------------------------------------------
+// Test-event heartbeat
+// ---------------------------------------------------------------------------
+
+const (
+	defaultTestEventInterval = 5 * time.Minute
+	defaultTestEventTimeout  = 30 * time.Second
+	defaultTestMessageID     = "Base.1.0.TestMessage"
+)
+
+// testEntry tracks an in-flight heartbeat test event for one BMC.
+type testEntry struct {
+	messageId string
+	deadline  time.Time
+}
+
+// maybeRunTestEvent fires a SubmitTestEvent if the per-BMC heartbeat cadence
+// has elapsed since the last send. Errors are logged but never surfaced to the
+// caller — a failed test event just means the next reconcile will retry.
+func (r *SubscriptionReconciler) maybeRunTestEvent(ctx context.Context, rc Client, bmcName string) {
+	interval := r.cfg.TestEventInterval
+	if interval <= 0 {
+		interval = defaultTestEventInterval
+	}
+	now := time.Now()
+	if v, ok := r.lastTestTime.Load(bmcName); ok {
+		if last, ok := v.(time.Time); ok && now.Sub(last) < interval {
+			return // not yet due
+		}
+	}
+
+	timeout := r.cfg.TestEventTimeout
+	if timeout <= 0 {
+		timeout = defaultTestEventTimeout
+	}
+	msgID := r.cfg.TestEventMessageId
+	if msgID == "" {
+		msgID = defaultTestMessageID
+	}
+	if err := rc.SubmitTestEvent(ctx, msgID); err != nil {
+		r.log.V(1).Info("SubmitTestEvent failed", "bmc", bmcName, "err", err.Error())
+		return
+	}
+	r.lastTestTime.Store(bmcName, now)
+	r.testPending.Store(bmcName, testEntry{
+		messageId: msgID,
+		deadline:  now.Add(timeout),
+	})
+	r.log.V(2).Info("Sent test event", "bmc", bmcName, "messageId", msgID)
+}
+
+// ConsumeIfTest implements the ConsumeIfTest interface. It returns true when
+// messageId matches the in-flight test event for bmcName and the deadline has
+// not yet passed, records the pipeline health metric, and removes the entry.
+// Returns false for all other events so they flow through the normal pipeline.
+func (r *SubscriptionReconciler) ConsumeIfTest(bmcName, messageId string) bool {
+	v, ok := r.testPending.Load(bmcName)
+	if !ok {
+		return false
+	}
+	entry, ok := v.(testEntry)
+	if !ok {
+		return false
+	}
+	if entry.messageId != messageId {
+		return false
+	}
+	r.testPending.Delete(bmcName)
+	result := "success"
+	if time.Now().After(entry.deadline) {
+		result = "timeout"
+	}
+	if r.TestRecorder != nil {
+		r.TestRecorder.RecordTestResult(bmcName, result)
+	}
+	r.log.V(2).Info("Test event round-trip completed", "bmc", bmcName, "result", result)
+	return true
 }
 
 // ---------------------------------------------------------------------------
@@ -455,6 +556,34 @@ func (c *redfishClient) DeleteEventSubscription(ctx context.Context, uri string)
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
 		return fmt.Errorf("DELETE %q returned %d", uri, resp.StatusCode)
+	}
+	return nil
+}
+
+func (c *redfishClient) SubmitTestEvent(ctx context.Context, messageId string) error {
+	payload := map[string]string{"MessageId": messageId}
+	rawBody, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
+		c.base+"/redfish/v1/EventService/Actions/EventService.SubmitTestEvent",
+		bytes.NewReader(rawBody))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.SetBasicAuth(c.username, c.password)
+
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return fmt.Errorf("POST SubmitTestEvent: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	_, _ = io.Copy(io.Discard, resp.Body)
+
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusNoContent {
+		return fmt.Errorf("SubmitTestEvent returned %d", resp.StatusCode)
 	}
 	return nil
 }

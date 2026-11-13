@@ -24,24 +24,28 @@ type connKey struct {
 // on the number of concurrent SSE connections to prevent thundering herd on
 // operator startup.
 type ConnectionManager struct {
-	mu   sync.Mutex
-	sem  *semaphore.Weighted
-	sink sink.MetricReportSink
-	sw   StatusWriter
-	log  logr.Logger
+	mu         sync.Mutex
+	sem        *semaphore.Weighted
+	sink       sink.MetricReportSink
+	sw         StatusWriter
+	eventSink  sink.EventSink
+	testFilter ConsumeIfTest
+	log        logr.Logger
 
 	conns map[connKey]*sseConn
 }
 
 // NewConnectionManager creates a ConnectionManager that allows at most
 // maxConcurrent simultaneous active SSE connections.
-func NewConnectionManager(maxConcurrent int64, s sink.MetricReportSink, sw StatusWriter, log logr.Logger) *ConnectionManager {
+func NewConnectionManager(maxConcurrent int64, s sink.MetricReportSink, sw StatusWriter, es sink.EventSink, tf ConsumeIfTest, log logr.Logger) *ConnectionManager {
 	return &ConnectionManager{
-		sem:   semaphore.NewWeighted(maxConcurrent),
-		sink:  s,
-		sw:    sw,
-		log:   log,
-		conns: make(map[connKey]*sseConn),
+		sem:        semaphore.NewWeighted(maxConcurrent),
+		sink:       s,
+		sw:         sw,
+		eventSink:  es,
+		testFilter: tf,
+		log:        log,
+		conns:      make(map[connKey]*sseConn),
 	}
 }
 
@@ -80,6 +84,8 @@ func (m *ConnectionManager) Ensure(ctx context.Context, cfg ConnConfig) error {
 		m.sem.Release(1)
 		return nil
 	}
+	cfg.EventSink = m.eventSink
+	cfg.TestFilter = m.testFilter
 	conn := startConn(logr.NewContext(ctx, m.log), cfg, m.sink, m.sw)
 	// The semaphore slot is released when the connection goroutine exits.
 	go func() {
