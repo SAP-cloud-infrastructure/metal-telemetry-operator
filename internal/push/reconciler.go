@@ -52,7 +52,7 @@ type EventServiceCapabilities struct {
 
 // Client is the minimal Redfish interface the subscription reconciler uses.
 type Client interface {
-	CreateEventSubscription(ctx context.Context, destination string, eventType redfishschemas.EventFormatType, policy redfishschemas.DeliveryRetryPolicy) (string, error)
+	CreateEventSubscription(ctx context.Context, destination string, eventType redfishschemas.EventFormatType, policy redfishschemas.DeliveryRetryPolicy, httpHeaders map[string]string) (string, error)
 	DeleteEventSubscription(ctx context.Context, uri string) error
 	ListEventSubscriptions(ctx context.Context) ([]Subscription, error)
 	ProbeEventService(ctx context.Context) (*EventServiceCapabilities, error)
@@ -79,6 +79,11 @@ type ReconcilerConfig struct {
 	Sink sink.EventSink
 	// AlertHandler is called with Forget on BMC deletion. Optional.
 	AlertHandler interface{ Forget(hostname string) }
+	// SubscriptionHeaders are optional HTTP headers included in every
+	// CreateEventSubscription call. BMCs include these headers verbatim in
+	// their event POSTs, enabling bearer-token authentication on the receiver.
+	// Nil means no extra headers (backward compatible).
+	SubscriptionHeaders map[string]string
 	// ConfigLoader provides live-reloaded push config used for test event
 	// interval/timeout. Optional; when nil test events are disabled.
 	ConfigLoader *ConfigLoader
@@ -283,7 +288,8 @@ func (r *SubscriptionReconciler) ensureSubscriptions(ctx context.Context, bmc *m
 		dest := r.destinationFor("metricsreport", bmc.Name)
 		uri, err := c.CreateEventSubscription(ctx, dest,
 			redfishschemas.MetricReportEventFormatType,
-			redfishschemas.RetryForeverDeliveryRetryPolicy)
+			redfishschemas.RetryForeverDeliveryRetryPolicy,
+			r.cfg.SubscriptionHeaders)
 		if err != nil {
 			return 0, fmt.Errorf("create MetricReport subscription: %w", err)
 		}
@@ -293,7 +299,8 @@ func (r *SubscriptionReconciler) ensureSubscriptions(ctx context.Context, bmc *m
 		dest := r.destinationFor("alerts", bmc.Name)
 		uri, err := c.CreateEventSubscription(ctx, dest,
 			redfishschemas.EventEventFormatType,
-			redfishschemas.RetryForeverDeliveryRetryPolicy)
+			redfishschemas.RetryForeverDeliveryRetryPolicy,
+			r.cfg.SubscriptionHeaders)
 		if err != nil {
 			return 0, fmt.Errorf("create alerts subscription: %w", err)
 		}
@@ -562,6 +569,40 @@ func wrapClient(base metalbmc.BMC) (Client, error) {
 		return nil, fmt.Errorf("bmc client %T does not expose Client() *gofish.APIClient", base)
 	}
 	return &extendedClient{BMC: base, api: accessor.Client()}, nil
+}
+
+// CreateEventSubscription overrides the embedded metalbmc.BMC method to
+// pass httpHeaders to the BMC. When httpHeaders is non-nil, the BMC stores
+// them and includes them verbatim in every event POST — this is the mechanism
+// that carries the bearer token to the operator's event receiver.
+func (c *extendedClient) CreateEventSubscription(
+	_ context.Context,
+	destination string,
+	eventFormatType redfishschemas.EventFormatType,
+	retry redfishschemas.DeliveryRetryPolicy,
+	httpHeaders map[string]string,
+) (string, error) {
+	svc := c.api.GetService()
+	if svc == nil {
+		return "", fmt.Errorf("create subscription: no service root")
+	}
+	es, err := svc.EventService()
+	if err != nil {
+		return "", fmt.Errorf("create subscription: event service: %w", err)
+	}
+	if !es.ServiceEnabled {
+		return "", fmt.Errorf("create subscription: event service is not enabled")
+	}
+	return es.CreateEventSubscriptionInstance(
+		destination,
+		nil, // registryPrefixes: subscribe to all
+		nil, // resourceTypes: subscribe to all
+		httpHeaders,
+		redfishschemas.RedfishEventDestinationProtocol,
+		"metal-operator",
+		retry,
+		nil, // oem
+	)
 }
 
 func (c *extendedClient) ListEventSubscriptions(_ context.Context) ([]Subscription, error) {

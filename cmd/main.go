@@ -53,6 +53,7 @@ func main() {
 	var pushEnableCriticalEventHandler bool
 	var pushEnableWarningEventHandler bool
 	var pushInsecureTLS bool
+	var pushSharedSecretName string
 	tlsOpts := make([]func(*tls.Config), 0, 1)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metrics endpoint binds to.")
@@ -81,6 +82,12 @@ func main() {
 		"Emit Kubernetes Events for Warning-severity Redfish alerts.")
 	flag.BoolVar(&pushInsecureTLS, "push-insecure-tls", false,
 		"Skip TLS certificate verification when connecting to BMCs for push subscriptions.")
+	flag.StringVar(&pushSharedSecretName, "push-shared-secret-name", "",
+		"Name of a Kubernetes Secret (in push-config-namespace) holding a 32-byte shared key "+
+			"used to authenticate incoming Redfish event POSTs. The Secret is created automatically "+
+			"on first start if it does not exist. When set, BMCs must include "+
+			"\"Authorization: Bearer <hex(key)>\" in every event POST. "+
+			"When empty, the event receiver accepts unauthenticated POSTs.")
 
 	// Disable HTTP/2 to avoid stream cancellation CVEs.
 	disableHTTP2 := func(c *tls.Config) {
@@ -146,6 +153,7 @@ func main() {
 			SubscriberID:               pushSubscriberID,
 			ConfigName:                 pushConfigName,
 			ConfigNamespace:            pushConfigNamespace,
+			SharedSecretName:           pushSharedSecretName,
 			EnableCriticalEventHandler: pushEnableCriticalEventHandler,
 			EnableWarningEventHandler:  pushEnableWarningEventHandler,
 			InsecureTLS:                pushInsecureTLS,

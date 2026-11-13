@@ -18,6 +18,7 @@ import (
 	"github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/criticalevent"
 	"github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/sink"
 	prometheusSink "github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/sink/prometheus"
+	"github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/utils"
 	"github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/warningevent"
 )
 
@@ -36,6 +37,13 @@ type Options struct {
 	ConfigName string
 	// ConfigNamespace is the namespace of the ConfigMap.
 	ConfigNamespace string
+	// SharedSecretName, when non-empty, names a Kubernetes Secret (in ConfigNamespace)
+	// that holds a shared bearer token used to authenticate incoming Redfish event POSTs.
+	// The Secret is created automatically on first start if it does not exist.
+	// The token must be configured in Redfish subscription HttpHeaders so BMCs include
+	// "Authorization: Bearer <token>" on every event POST.
+	// When empty, the event receiver accepts unauthenticated POSTs (backward compatible).
+	SharedSecretName string
 	// EnableCriticalEventHandler enables the CriticalEventReceived condition on Servers.
 	EnableCriticalEventHandler bool
 	// EnableWarningEventHandler enables Kubernetes Events for Warning-severity alerts.
@@ -51,6 +59,8 @@ type Options struct {
 
 // AddTo registers the push receiver and subscription reconciler with the manager.
 // It must be called after manager creation and before mgr.Start.
+//
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create
 func AddTo(mgr ctrl.Manager, opts *Options) error {
 	log := opts.Log
 	if (log == logr.Logger{}) {
@@ -134,9 +144,19 @@ func AddTo(mgr ctrl.Manager, opts *Options) error {
 		log.WithName("metric-fetcher"),
 	)
 
+	var sharedSecret []byte
+	if opts.SharedSecretName != "" && opts.ConfigNamespace != "" {
+		k, err := utils.EnsureHMACKey(context.Background(), mgr.GetClient(), opts.ConfigNamespace, opts.SharedSecretName)
+		if err != nil {
+			return fmt.Errorf("provision event receiver shared secret: %w", err)
+		}
+		sharedSecret = k
+	}
+
 	receiver, err := NewReceiver(ReceiverConfig{
 		Addr:          opts.EventsAddr,
 		SubscriberID:  opts.SubscriberID,
+		SharedSecret:  sharedSecret,
 		Sink:          metricSink,
 		EventSink:     eventSink,
 		MetricFetcher: metricFetcher,
@@ -144,6 +164,12 @@ func AddTo(mgr ctrl.Manager, opts *Options) error {
 	})
 	if err != nil {
 		return fmt.Errorf("create push receiver: %w", err)
+	}
+
+	if len(sharedSecret) > 0 {
+		reconciler.cfg.SubscriptionHeaders = map[string]string{
+			"Authorization": "Bearer " + receiver.BearerToken(),
+		}
 	}
 
 	receiver.SetOnResourceRemoved(reconciler.EnqueueBMC)

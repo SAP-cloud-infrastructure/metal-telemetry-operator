@@ -5,6 +5,8 @@ package push
 
 import (
 	"context"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -55,6 +57,16 @@ type ReceiverConfig struct {
 	// SubscriberID scopes all receiver routes under a per-subscriber path segment.
 	// When empty, routes are /serverevents/metricsreport/ and /serverevents/alerts/.
 	SubscriberID string
+	// SharedSecret, when non-empty, enables bearer-token authentication on the
+	// alert and metricsreport endpoints. Every incoming POST must carry:
+	//
+	//   Authorization: Bearer <hex(SharedSecret)>
+	//
+	// Requests without a matching token are rejected with 401. When nil or
+	// empty, the endpoints are unauthenticated (backward compatible). Configure
+	// the same token in the Redfish subscription HttpHeaders so BMCs include it
+	// on every event POST.
+	SharedSecret []byte
 	// Sink receives decoded MetricReport samples. Required.
 	Sink sink.MetricReportSink
 	// EventSink receives decoded Redfish alert events. Optional; when nil the
@@ -84,6 +96,7 @@ type Receiver struct {
 	alertsPath  string
 	metricsPath string
 	fetchSem    chan struct{}
+	bearerToken string // hex-encoded SharedSecret; empty disables auth
 }
 
 var (
@@ -112,6 +125,9 @@ func NewReceiver(cfg ReceiverConfig) (*Receiver, error) {
 		alertsPath:  alertsPathFor(cfg.SubscriberID),
 		metricsPath: metricsPathFor(cfg.SubscriberID),
 		fetchSem:    make(chan struct{}, maxConcurrentFetches),
+	}
+	if len(cfg.SharedSecret) > 0 {
+		r.bearerToken = hex.EncodeToString(cfg.SharedSecret)
 	}
 	r.buildMux()
 	r.srv = &http.Server{
@@ -153,6 +169,29 @@ func (r *Receiver) SetTestNotifier(n TestEventNotifier) {
 	r.cfg.TestNotifier = n
 }
 
+// BearerToken returns the hex-encoded shared secret configured for this
+// receiver, or an empty string when auth is disabled. Used by the push
+// pipeline to populate SubscriptionHeaders on the subscription reconciler
+// so BMCs include the token in their event POSTs.
+func (r *Receiver) BearerToken() string {
+	return r.bearerToken
+}
+
+// checkAuth verifies the Authorization: Bearer header when a SharedSecret is
+// configured. Returns true when the request is authorized (or auth is
+// disabled). Writes 401 and returns false when the token is missing or wrong.
+func (r *Receiver) checkAuth(w http.ResponseWriter, req *http.Request) bool {
+	if r.bearerToken == "" {
+		return true
+	}
+	got := strings.TrimPrefix(req.Header.Get("Authorization"), "Bearer ")
+	if subtle.ConstantTimeCompare([]byte(got), []byte(r.bearerToken)) != 1 {
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
 // Start listens on cfg.Addr and serves until ctx is cancelled.
 func (r *Receiver) Start(ctx context.Context) error {
 	r.log.Info("Started push receiver", "addr", r.cfg.Addr)
@@ -183,6 +222,9 @@ func (r *Receiver) Start(ctx context.Context) error {
 func (r *Receiver) handleMetricReport(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {
 		http.Error(w, "Only POST is allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !r.checkAuth(w, req) {
 		return
 	}
 	bmcName := bmcNameFrom(req.URL.Path, r.metricsPath)
@@ -343,6 +385,9 @@ func (e wireEvent) toEvent() sink.Event {
 func (r *Receiver) handleAlerts(w http.ResponseWriter, req *http.Request) {
 	if req.Method != http.MethodPost {
 		http.Error(w, "Only POST is allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if !r.checkAuth(w, req) {
 		return
 	}
 	bmcName := bmcNameFrom(req.URL.Path, r.alertsPath)
