@@ -11,6 +11,7 @@ package controller
 // +kubebuilder:rbac:groups=telemetry.metal.ironcore.dev,resources=bmctelemetries/finalizers,verbs=update
 // +kubebuilder:rbac:groups=telemetry.metal.ironcore.dev,resources=bmctelemetries/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups=events.k8s.io,resources=events,verbs=create;patch
 
 import (
 	"context"
