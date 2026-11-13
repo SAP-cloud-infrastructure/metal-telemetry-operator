@@ -26,6 +26,13 @@ rules:
   - create
   - patch
 - apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - get
+- apiGroups:
   - metal.ironcore.dev
   resources:
   - bmcs
@@ -60,13 +67,6 @@ rules:
   - bmctelemetries/finalizers
   verbs:
   - update
-- apiGroups:
-  - ""
-  resources:
-  - secrets
-  verbs:
-  - get
-  - create
 - apiGroups:
   - telemetry.metal.ironcore.dev
   resources:

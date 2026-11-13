@@ -31,6 +31,7 @@ manager:
     - --push-subscriber-id={{ .Values.push.subscriberID }}
     - --push-config-name={{ .Values.push.configName }}
     - --push-config-namespace={{ .Values.push.configNamespace }}
+    - --push-events-shared-secret-name={{ .Values.push.sharedSecretName }}
 
   ## Environment variables for the manager container
   ##

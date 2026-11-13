@@ -87,9 +87,6 @@ spec:
         {{- range .Values.manager.args }}
         - {{ tpl . $ }}
         {{- end }}
-        {{- if and .Values.push.sharedSecretName .Values.push.configNamespace }}
-        - --push-events-shared-secret-name={{ .Values.push.sharedSecretName }}
-        {{- end }}
         command:
         - /manager
         env:

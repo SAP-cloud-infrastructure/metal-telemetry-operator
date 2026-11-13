@@ -5,6 +5,7 @@
 package push
 
 // +kubebuilder:rbac:groups="",resources=configmaps,verbs=get;list;watch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create
 
 import (
 	"context"

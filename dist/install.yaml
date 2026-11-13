@@ -335,6 +335,13 @@ rules:
   - create
   - patch
 - apiGroups:
+  - ""
+  resources:
+  - secrets
+  verbs:
+  - create
+  - get
+- apiGroups:
   - metal.ironcore.dev
   resources:
   - bmcs
