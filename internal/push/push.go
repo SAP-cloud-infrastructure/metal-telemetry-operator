@@ -59,8 +59,6 @@ type Options struct {
 
 // AddTo registers the push receiver and subscription reconciler with the manager.
 // It must be called after manager creation and before mgr.Start.
-//
-// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create
 func AddTo(mgr ctrl.Manager, opts *Options) error {
 	log := opts.Log
 	if (log == logr.Logger{}) {

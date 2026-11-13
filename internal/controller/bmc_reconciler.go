@@ -33,6 +33,7 @@ import (
 // +kubebuilder:rbac:groups=metal.ironcore.dev,resources=servers,verbs=get;list;watch
 // +kubebuilder:rbac:groups=metal.ironcore.dev,resources=servers/status,verbs=get;patch
 // +kubebuilder:rbac:groups="",resources=events,verbs=create;patch
+// +kubebuilder:rbac:groups="",resources=secrets,verbs=get;create
 // +kubebuilder:rbac:groups=telemetry.metal.ironcore.dev,resources=bmctelemetries,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=telemetry.metal.ironcore.dev,resources=bmctelemetries/status,verbs=get;update;patch
 
