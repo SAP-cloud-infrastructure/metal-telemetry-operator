@@ -5,7 +5,7 @@ go 1.27.4
 require (
 	github.com/Masterminds/semver/v3 v3.4.0
 	github.com/go-logr/logr v1.4.4
-	github.com/ironcore-dev/metal-operator v0.8.1-0.20261027090827-a4276fd5b842
+	github.com/ironcore-dev/metal-operator v0.8.1-0.20261111133436-2d799d1a968c
 	github.com/onsi/ginkgo/v2 v2.33.1
 	github.com/onsi/gomega v1.44.0
 	github.com/prometheus/client_golang v1.25.0
