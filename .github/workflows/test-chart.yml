@@ -50,6 +50,11 @@ jobs:
         run: |
           helm lint ./dist/chart
 
+      - name: Install metal-operator CRDs
+        run: |
+          COMMIT=$(go list -m -json github.com/ironcore-dev/metal-operator | jq -r '.Version' | sed 's/.*-//')
+          kubectl apply -k "https://github.com/ironcore-dev/metal-operator/config/crd?ref=${COMMIT}"
+
 # TODO: Uncomment if cert-manager is enabled
 #      - name: Install cert-manager via Helm (wait for readiness)
 #        run: |
