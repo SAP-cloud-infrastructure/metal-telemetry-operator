@@ -52,8 +52,8 @@ jobs:
 
       - name: Install metal-operator CRDs
         run: |
-          COMMIT=$(go list -m -json github.com/ironcore-dev/metal-operator | jq -r '.Version' | sed 's/.*-//')
-          kubectl apply -k "https://github.com/ironcore-dev/metal-operator/config/crd?ref=${COMMIT}"
+          MODULE_DIR=$(go list -m -json github.com/ironcore-dev/metal-operator | jq -r '.Dir')
+          kubectl apply -k "${MODULE_DIR}/config/crd"
 
 # TODO: Uncomment if cert-manager is enabled
 #      - name: Install cert-manager via Helm (wait for readiness)
