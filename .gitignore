@@ -28,3 +28,8 @@ go.work
 
 # Kubeconfig might contain secrets
 *.kubeconfig
+plugins-archive
+sci-config.yaml
+datasource.yaml
+plugins
+dashboards/built
