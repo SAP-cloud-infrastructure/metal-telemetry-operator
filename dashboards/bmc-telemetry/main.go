@@ -155,7 +155,7 @@ func main() {
 				panel.Description("Number of BMCs in the selected building block currently pushing MetricReport telemetry to the operator. A count lower than Total BMCs indicates hosts not yet enrolled in telemetry or experiencing subscription delivery failures."),
 				panel.AddQuery(
 					mto.PromQL(
-						`count(`+mto.BBJoin(cfg, `count by(hostname)(redfish_monitor_reading)`)+`) or vector(0)`,
+						`count(`+mto.BBJoin(cfg, `count by(hostname)(redfish_telemetry_reading)`)+`) or vector(0)`,
 						"$datasource",
 					),
 				),
@@ -349,7 +349,7 @@ func main() {
 				panel.AddQuery(
 					mto.PromQL(
 						`count by(manufacturer,model)(`+
-							`count by(hostname)(redfish_monitor_reading)`+
+							`count by(hostname)(redfish_telemetry_reading)`+
 							` * on(hostname) group_left(manufacturer,model)`+
 							` label_replace(kube_ironcore_bmc_info{`+region+`=~"$region",`+bb+`=~"$bb",name=~"$node",manufacturer=~"$manufacturer",model=~"$model",manufacturer!=""},"hostname","$1","name","(.*)")`+
 							`)`+
@@ -364,7 +364,7 @@ func main() {
 							` - on(manufacturer,model) group_left()`+
 							` (`+
 							`count by(manufacturer,model)(`+
-							`count by(hostname)(redfish_monitor_reading)`+
+							`count by(hostname)(redfish_telemetry_reading)`+
 							` * on(hostname) group_left(manufacturer,model)`+
 							` label_replace(kube_ironcore_bmc_info{`+region+`=~"$region",`+bb+`=~"$bb",name=~"$node",manufacturer=~"$manufacturer",model=~"$model",manufacturer!=""},"hostname","$1","name","(.*)")`+
 							`)`+
@@ -388,7 +388,7 @@ func main() {
 					table.WithEnableFiltering(true),
 					table.WithColumnSettings(inventoryCols),
 				),
-				panel.Description("Per-BMC inventory showing hardware identity, topology and telemetry status. The Telemetry column shows green (Reporting) when the BMC is actively pushing redfish_monitor_reading metrics and red (Not Reporting) when no readings are present. Non-reporting BMCs sort to the top by default. Click the BMC Name link to open the BMC Detail dashboard for that host."),
+				panel.Description("Per-BMC inventory showing hardware identity, topology and telemetry status. The Telemetry column shows green (Reporting) when the BMC is actively pushing redfish_telemetry_reading metrics and red (Not Reporting) when no readings are present. Non-reporting BMCs sort to the top by default. Click the BMC Name link to open the BMC Detail dashboard for that host."),
 				panel.AddLink("/projects/"+cfg.ProjectName+"/dashboards/bmc-detail",
 					link.Name("BMC Detail"),
 					link.RenderVariable(true),
@@ -399,20 +399,20 @@ func main() {
 				panel.AddQuery(
 					mto.PromQL(
 						// BBJoin scopes readings to the selected region/bb/node/manufacturer/model
-						// by joining redfish_monitor_reading with kube_ironcore_bmc_info on hostname.
+						// by joining redfish_telemetry_reading with kube_ironcore_bmc_info on hostname.
 						// This prevents readings from a same-named BMC in a different building block
 						// (e.g. in a federated Prometheus) from affecting the telemetry status shown here.
 						`label_replace(`+
 							`kube_ironcore_bmc_info{`+region+`=~"$region",`+bb+`=~"$bb",name=~"$node",manufacturer=~"$manufacturer",model=~"$model"}`+
 							` * on(name) group_left()`+
-							` label_replace((`+mto.BBJoin(cfg, `count by(hostname)(redfish_monitor_reading)`)+`) > bool 0, "name", "$1", "hostname", "(.*)"),`+
+							` label_replace((`+mto.BBJoin(cfg, `count by(hostname)(redfish_telemetry_reading)`)+`) > bool 0, "name", "$1", "hostname", "(.*)"),`+
 							` "telemetry", "Reporting", "name", ".*"`+
 							`)`+
 							` or`+
 							` label_replace(`+
 							`kube_ironcore_bmc_info{`+region+`=~"$region",`+bb+`=~"$bb",name=~"$node",manufacturer=~"$manufacturer",model=~"$model"}`+
 							` unless on(name)`+
-							` label_replace(`+mto.BBJoin(cfg, `count by(hostname)(redfish_monitor_reading)`)+`, "name", "$1", "hostname", "(.*)"),`+
+							` label_replace(`+mto.BBJoin(cfg, `count by(hostname)(redfish_telemetry_reading)`)+`, "name", "$1", "hostname", "(.*)"),`+
 							` "telemetry", "Not Reporting", "name", ".*"`+
 							`)`,
 						"$datasource",

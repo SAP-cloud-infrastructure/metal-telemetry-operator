@@ -271,7 +271,7 @@ func main() {
 				panel.Description("CPU thermal design power ceiling. Sustained operation at this level means the CPU is at its thermal or power limit; compare with frequency panels — throttling will show as a frequency drop.\n\n**Vendor support:** HPE iLO only (metric: CpuMax)."),
 				panel.AddQuery(
 					mto.PromQL(
-						`max by(hostname)(`+mto.BBJoinNode(cfg, `redfish_monitor_reading{metric_id="CpuMax"}`)+`)`,
+						`max by(hostname)(`+mto.BBJoinNode(cfg, `redfish_telemetry_reading{metric_id="CpuMax"}`)+`)`,
 						"$datasource",
 						"{{hostname}}",
 					),
@@ -282,7 +282,7 @@ func main() {
 				panel.Description("Active CPU power cap enforced by the BMC power policy. A value below CpuMax means a power-capping policy is reducing CPU performance; this is intentional in environments with strict per-rack power budgets.\n\n**Vendor support:** HPE iLO only (metric: CpuCapLim)."),
 				panel.AddQuery(
 					mto.PromQL(
-						`max by(hostname)(`+mto.BBJoinNode(cfg, `redfish_monitor_reading{metric_id="CpuCapLim"}`)+`)`,
+						`max by(hostname)(`+mto.BBJoinNode(cfg, `redfish_telemetry_reading{metric_id="CpuCapLim"}`)+`)`,
 						"$datasource",
 						"{{hostname}}",
 					),
@@ -293,7 +293,7 @@ func main() {
 				panel.Description("Power target when the CPU power-save policy is active. Servers operating at this level trade throughput for energy efficiency; this is expected during off-peak hours but may cause latency issues for interactive workloads.\n\n**Vendor support:** HPE iLO only (metric: CpuPwrSavLim)."),
 				panel.AddQuery(
 					mto.PromQL(
-						`max by(hostname)(`+mto.BBJoinNode(cfg, `redfish_monitor_reading{metric_id="CpuPwrSavLim"}`)+`)`,
+						`max by(hostname)(`+mto.BBJoinNode(cfg, `redfish_telemetry_reading{metric_id="CpuPwrSavLim"}`)+`)`,
 						"$datasource",
 						"{{hostname}}",
 					),

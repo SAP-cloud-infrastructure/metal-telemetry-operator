@@ -232,7 +232,7 @@ func BMCInfoTopologyJoin(cfg DashboardConfig, expr, joinKey string) string {
 
 // BBJoin enforces $bb/$node/$manufacturer/$model filtering by joining expr with
 // kube_ironcore_bmc_info (topology + hardware identity).
-// redfish_monitor_reading carries no topology labels; all filtering is done via the join.
+// redfish_telemetry_reading carries no topology labels; all filtering is done via the join.
 // kube_ironcore_bmc_info covers every BMC regardless of firmware management enrollment.
 func BBJoin(cfg DashboardConfig, expr string) string {
 	region := TopologyRegionLabel(cfg)
