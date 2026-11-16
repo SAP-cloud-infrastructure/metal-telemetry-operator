@@ -42,6 +42,15 @@ redfish_telemetry_reading{metric_id=~".*Temperature.*", unit="Cel"}
 
 # Total power draw by region
 sum by (region) (redfish_telemetry_reading{metric_id=~".*Power.*", unit="W"})
+
+# All BMCs currently reporting at least one reading
+count by (hostname) (redfish_telemetry_reading)
+
+# All distinct metric_id values being reported across the fleet
+count by (metric_id) (redfish_telemetry_reading)
+
+# Which metric_ids a specific BMC reports
+count by (metric_id) (redfish_telemetry_reading{hostname="<bmc-name>"})
 ```
 
 ---
