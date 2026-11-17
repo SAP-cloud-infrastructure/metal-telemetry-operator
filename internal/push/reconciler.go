@@ -644,14 +644,21 @@ func (c *redfishClient) DeleteEventSubscription(ctx context.Context, uri string)
 func (c *redfishClient) SubmitTestEvent(ctx context.Context, params TestEventParams) error {
 	// HPE iLO 7 requires all fields; other vendors accept a minimal payload.
 	// OriginOfCondition must be a plain string on HPE (not a {"@odata.id":"..."} link).
+	// Dell iDRAC10 (17G) rejects OriginOfCondition as a plain string — omit it.
+	// Lenovo XCC rejects the Severity field — omit it.
+	// Only include optional fields when the override rule explicitly sets them.
 	payload := map[string]any{
-		"MessageId":         params.MessageId,
-		"EventId":           "1",
-		"EventTimestamp":    time.Now().UTC().Format(time.RFC3339),
-		"Message":           "Redfish pipeline health check",
-		"MessageArgs":       []string{},
-		"Severity":          params.Severity,
-		"OriginOfCondition": params.OriginOfCondition,
+		"MessageId":      params.MessageId,
+		"EventId":        "1",
+		"EventTimestamp": time.Now().UTC().Format(time.RFC3339),
+		"Message":        "Redfish pipeline health check",
+		"MessageArgs":    []string{},
+	}
+	if params.Severity != "" {
+		payload["Severity"] = params.Severity
+	}
+	if params.OriginOfCondition != "" {
+		payload["OriginOfCondition"] = params.OriginOfCondition
 	}
 	rawBody, err := json.Marshal(payload)
 	if err != nil {

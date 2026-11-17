@@ -143,12 +143,6 @@ func (c *Config) TestParamsFor(vendor, model string) TestEventParams {
 					Severity:          ov.Severity,
 					OriginOfCondition: ov.OriginOfCondition,
 				}
-				if p.Severity == "" {
-					p.Severity = "OK"
-				}
-				if p.OriginOfCondition == "" {
-					p.OriginOfCondition = "/redfish/v1/Managers/1"
-				}
 				return p
 			}
 		}
