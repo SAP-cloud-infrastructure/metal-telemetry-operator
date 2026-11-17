@@ -109,13 +109,140 @@ redfish_server_critical_alert == 1
 
 ---
 
+### `redfish_event_pipeline_test_timestamp` — Gauge
+
+Unix timestamp (seconds) of the last successful end-to-end test event round-trip for a BMC. The operator periodically calls the Redfish `SubmitTestEvent` action on each BMC and waits for the resulting event to arrive back through the same pipeline. A successful round-trip updates this gauge; a timeout records a `redfish_event_pipeline_test_result_total{result="timeout"}` increment instead.
+
+The gauge is absent for a BMC until its first successful round-trip, so `absent()` can detect BMCs that have never completed one.
+
+| Label | Description |
+|-------|-------------|
+| `hostname` | BMC resource name in Kubernetes |
+
+**Example queries:**
+
+```promql
+# BMCs whose last successful test event was more than 30 minutes ago
+(time() - redfish_event_pipeline_test_timestamp) > 1800
+
+# BMCs with no successful test event in Prometheus memory (never received one)
+absent(redfish_event_pipeline_test_timestamp)
+
+# Alert: pipeline health degraded for more than 20 minutes
+(time() - redfish_event_pipeline_test_timestamp) > 1200
+```
+
+---
+
 ### Standard controller-runtime metrics
 
 The operator also exposes the standard `controller_runtime_*` and `workqueue_*` metrics provided by the controller-runtime framework, including reconcile counts, error rates, and queue depth per controller.
 
-## Getting Started
+## BMC Configuration
 
-### Prerequisites
+The operator loads its runtime tuning and per-vendor test event parameters from a Kubernetes ConfigMap, identified by the `--bmc-config-name` and `--bmc-config-namespace` flags. The ConfigMap is **live-reloaded** — changes take effect on the next reconcile cycle without a pod restart.
+
+The ConfigMap must contain a single key `config.yaml` with YAML content conforming to `apiVersion: telemetry.metal.ironcore.dev/v1alpha1`.
+
+### Configuration fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `apiVersion` | string | — | Must be `telemetry.metal.ironcore.dev/v1alpha1` when set |
+| `reconcileInterval` | duration | `10m` | How often the push reconciler re-verifies each BMC's subscription |
+| `testEventInterval` | duration | `reconcileInterval` | How often to fire a SubmitTestEvent heartbeat per BMC |
+| `testEventTimeout` | duration | `30s` | How long to wait for a test event round-trip before recording a timeout |
+| `testEventOverrides` | list | — | Per-vendor SubmitTestEvent parameters; first matching rule wins |
+| `modeOverrides` | list | — | Force a specific `TelemetryMode` (`SSE` or `Push`) for matching vendor/model combinations |
+| `excludeHardware` | list | — | Opt specific vendor/model combinations out of all telemetry collection |
+
+### `testEventOverrides`
+
+Each rule specifies the Redfish `SubmitTestEvent` body for a vendor+model combination. The first rule whose `vendor` and one of its `models` match the BMC is used. Use `"*"` in `models` to match all models for a vendor. When no rule matches, the defaults `Base.1.0.TestMessage` / `OK` / `/redfish/v1/Managers/1` are used.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `vendor` | yes | Must match `bmc.status.manufacturer` (e.g. `HPE`, `Dell Inc.`, `Lenovo`, `BULL`) |
+| `models` | yes | List of `bmc.status.model` values to match; `["*"]` matches all models |
+| `messageId` | yes | Redfish `MessageId` to send in SubmitTestEvent |
+| `severity` | no | `Severity` field; defaults to `OK` |
+| `originOfCondition` | no | `OriginOfCondition` field; defaults to `/redfish/v1/Managers/1` |
+
+### `modeOverrides`
+
+Overrides auto-detected telemetry mode for matching BMCs.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `vendor` | yes | Must match `bmc.status.manufacturer` |
+| `models` | yes | List of `bmc.status.model` values; `["*"]` matches all |
+| `mode` | yes | `SSE` or `Push` |
+
+### `excludeHardware`
+
+Opts vendor/model combinations out of all telemetry collection entirely.
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `vendor` | yes | Must match `bmc.status.manufacturer` |
+| `models` | yes | List of `bmc.status.model` values; `["*"]` excludes all models for this vendor |
+| `minFirmware` | no | When set, only firmware versions strictly below this semver are excluded |
+
+### Example ConfigMap
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: metal-telemetry-operator-bmc-config
+  namespace: kube-system
+data:
+  config.yaml: |
+    apiVersion: telemetry.metal.ironcore.dev/v1alpha1
+    reconcileInterval: "10m"
+    testEventInterval: "5m"
+    testEventTimeout: "30s"
+
+    testEventOverrides:
+      - vendor: "HPE"
+        models:
+          - "iLO 6"
+          - "iLO 7"
+        messageId: "iLOEvents.1.0.TestAlert"
+        severity: "OK"
+        originOfCondition: "/redfish/v1/Managers/1"
+      - vendor: "Dell Inc."
+        models:
+          - "16G Monolithic"
+        messageId: "FAN0001"
+        severity: "Informational"
+      - vendor: "Dell Inc."
+        models:
+          - "17G Monolithic"
+        messageId: "FAN.1.0.FAN0001"
+        severity: "Informational"
+      - vendor: "Lenovo"
+        models:
+          - "Lenovo XClarity Controller"
+          - "Lenovo XClarity Controller 3"
+        messageId: "EventRegistry.1.0.0.FQXSPCA0012I"
+      - vendor: "BULL"
+        models:
+          - "OpenBmc"
+        messageId: "OpenBMC.0.1.BMCBooted"
+
+    modeOverrides:
+      - vendor: "HPE"
+        models: ["*"]
+        mode: Push
+
+    excludeHardware:
+      - vendor: "Supermicro"
+        models: ["*"]
+        minFirmware: "3.0.0"
+```
+
+## Getting Started
 - go version v1.24.6+
 - docker version 17.03+
 - kubectl version v1.11.3+
