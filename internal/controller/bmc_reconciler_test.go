@@ -5,6 +5,8 @@ package controller
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -349,5 +351,193 @@ func TestBMCReconciler_RecordAlertEvent_updatesLastEventTime(t *testing.T) {
 	}
 	if got.Status.LastEventTime == nil {
 		t.Error("expected LastEventTime to be set after RecordAlertEvent")
+	}
+}
+
+func findCondition(conditions []metav1.Condition, condType string) *metav1.Condition {
+	for i := range conditions {
+		if conditions[i].Type == condType {
+			return &conditions[i]
+		}
+	}
+	return nil
+}
+
+// ---------------------------------------------------------------------------
+// normaliseProbeError unit tests
+// ---------------------------------------------------------------------------
+
+func TestNormaliseProbeError(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "strips_http_get_and_tcp_prefix",
+			input: `Get "https://10.245.252.135/redfish/v1/EventService": read tcp 10.42.0.207:55420->10.245.252.135:443: connection reset by peer`,
+			want:  "connection reset by peer",
+		},
+		{
+			name:  "strips_tcp_prefix_only",
+			input: `read tcp 10.42.0.207:55421->10.245.252.135:443: i/o timeout`,
+			want:  "i/o timeout",
+		},
+		{
+			name:  "passes_through_plain_http_401",
+			input: "401 Unauthorized",
+			want:  "401 Unauthorized",
+		},
+		{
+			name:  "passes_through_tls_error",
+			input: "tls: failed to verify certificate: x509: certificate signed by unknown authority",
+			want:  "tls: failed to verify certificate: x509: certificate signed by unknown authority",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := normaliseProbeError(errors.New(tc.input))
+			if got != tc.want {
+				t.Errorf("normaliseProbeError(%q) = %q, want %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// setSchemaDetectedCondition idempotency unit tests
+// ---------------------------------------------------------------------------
+
+func TestSetSchemaDetectedCondition_idempotent(t *testing.T) {
+	tel := &telemetryv1alpha1.BMCTelemetry{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-bmc-metrics"},
+	}
+	r := newDispatchReconciler(t, tel)
+	ctx := context.Background()
+
+	// First call: condition does not yet exist → should patch.
+	if err := r.setSchemaDetectedCondition(ctx, tel, false, "probe failed: connection reset by peer (next retry in ~5m)"); err != nil {
+		t.Fatalf("first setSchemaDetectedCondition: %v", err)
+	}
+	got := &telemetryv1alpha1.BMCTelemetry{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "test-bmc-metrics"}, got); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	rv1 := got.ResourceVersion
+	cond := findCondition(got.Status.Conditions, telemetryv1alpha1.ConditionSchemaDetected)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "ProbeFailed" {
+		t.Fatalf("expected SchemaDetected=False/ProbeFailed after first call, got %+v", cond)
+	}
+
+	// Refresh tel to reflect stored state.
+	*tel = *got
+
+	// Second call with same status+reason → must be a no-op (ResourceVersion unchanged).
+	if err := r.setSchemaDetectedCondition(ctx, tel, false, "probe failed: connection reset by peer (next retry in ~5m)"); err != nil {
+		t.Fatalf("second setSchemaDetectedCondition: %v", err)
+	}
+	got2 := &telemetryv1alpha1.BMCTelemetry{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "test-bmc-metrics"}, got2); err != nil {
+		t.Fatalf("Get after second call: %v", err)
+	}
+	if got2.ResourceVersion != rv1 {
+		t.Errorf("second call with same status+reason must not patch: rv before=%s, rv after=%s", rv1, got2.ResourceVersion)
+	}
+
+	// Third call with different status → must patch (ResourceVersion changes).
+	*tel = *got2
+	if err := r.setSchemaDetectedCondition(ctx, tel, true, "EventService probed successfully"); err != nil {
+		t.Fatalf("third setSchemaDetectedCondition: %v", err)
+	}
+	got3 := &telemetryv1alpha1.BMCTelemetry{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "test-bmc-metrics"}, got3); err != nil {
+		t.Fatalf("Get after third call: %v", err)
+	}
+	if got3.ResourceVersion == rv1 {
+		t.Error("third call with different status must patch: ResourceVersion should change")
+	}
+	cond3 := findCondition(got3.Status.Conditions, telemetryv1alpha1.ConditionSchemaDetected)
+	if cond3 == nil || cond3.Status != metav1.ConditionTrue || cond3.Reason != "Probed" {
+		t.Fatalf("expected SchemaDetected=True/Probed after third call, got %+v", cond3)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// probeBackoff unit tests
+// ---------------------------------------------------------------------------
+
+func TestProbeBackoff(t *testing.T) {
+	cases := []struct {
+		failures int
+		want     time.Duration
+	}{
+		{1, 5 * time.Minute},
+		{2, 10 * time.Minute},
+		{3, 20 * time.Minute},
+		{4, 30 * time.Minute},
+		{100, 30 * time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("failures=%d", tc.failures), func(t *testing.T) {
+			got := probeBackoff(tc.failures)
+			if got != tc.want {
+				t.Errorf("probeBackoff(%d) = %v, want %v", tc.failures, got, tc.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// setConnectedCondition unit tests
+// ---------------------------------------------------------------------------
+
+func TestProbeFailureClearsConnectedCondition(t *testing.T) {
+	tel := &telemetryv1alpha1.BMCTelemetry{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-bmc-metrics"},
+		Status: telemetryv1alpha1.BMCTelemetryStatus{
+			ConnectionState: telemetryv1alpha1.ConnectionStateConnected,
+			Conditions: []metav1.Condition{
+				{
+					Type:               telemetryv1alpha1.ConditionConnected,
+					Status:             metav1.ConditionTrue,
+					Reason:             "Connected",
+					LastTransitionTime: metav1.Now(),
+				},
+			},
+		},
+	}
+	r := newDispatchReconciler(t, tel)
+	ctx := context.Background()
+
+	// First call: Connected=True → should patch to False/ProbeFailed + ProbeBackoff.
+	if err := r.setConnectedCondition(ctx, tel, false, "ProbeFailed"); err != nil {
+		t.Fatalf("first setConnectedCondition: %v", err)
+	}
+	got := &telemetryv1alpha1.BMCTelemetry{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "test-bmc-metrics"}, got); err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	rv1 := got.ResourceVersion
+	cond := findCondition(got.Status.Conditions, telemetryv1alpha1.ConditionConnected)
+	if cond == nil || cond.Status != metav1.ConditionFalse || cond.Reason != "ProbeFailed" {
+		t.Fatalf("expected Connected=False/ProbeFailed, got %+v", cond)
+	}
+	if got.Status.ConnectionState != telemetryv1alpha1.ConnectionStateProbeBackoff {
+		t.Errorf("expected ConnectionState=ProbeBackoff, got %q", got.Status.ConnectionState)
+	}
+
+	// Refresh tel to reflect stored state.
+	*tel = *got
+
+	// Second call with same state → must be a no-op.
+	if err := r.setConnectedCondition(ctx, tel, false, "ProbeFailed"); err != nil {
+		t.Fatalf("second setConnectedCondition: %v", err)
+	}
+	got2 := &telemetryv1alpha1.BMCTelemetry{}
+	if err := r.Get(ctx, types.NamespacedName{Name: "test-bmc-metrics"}, got2); err != nil {
+		t.Fatalf("Get after second call: %v", err)
+	}
+	if got2.ResourceVersion != rv1 {
+		t.Errorf("second call must not patch: rv before=%s, rv after=%s", rv1, got2.ResourceVersion)
 	}
 }

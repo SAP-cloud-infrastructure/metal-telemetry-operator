@@ -148,6 +148,7 @@ spec:
                 - Failed
                 - SubscriptionActive
                 - SlotsFull
+                - ProbeBackoff
                 type: string
               filterSyntax:
                 description: filterSyntax is the SSE filter syntax variant detected

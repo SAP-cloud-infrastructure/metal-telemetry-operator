@@ -17,6 +17,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -71,6 +72,9 @@ type BMCReconciler struct {
 	connMgr         *sse.ConnectionManager
 	sinkInst        sink.MetricReportSink
 	criticalHandler *criticalevent.ConditionHandler
+
+	// probeFailures tracks consecutive EventService probe failures per BMC (key: BMC name, value: int).
+	probeFailures sync.Map
 }
 
 // SetupWithManager initializes the reconciler and registers it with the manager.
@@ -302,15 +306,30 @@ func (r *BMCReconciler) probeEventServiceForBMC(
 	vendorCfg, err = sse.ProbeEventService(ctx, host, username, password)
 	if err != nil {
 		log.Error(err, "EventService probe failed")
-		if err2 := r.setSchemaDetectedCondition(ctx, metricsTel, false, err.Error()); err2 != nil {
+		var count int
+		if v, ok := r.probeFailures.Load(bmc.Name); ok {
+			count = v.(int)
+		}
+		count++
+		r.probeFailures.Store(bmc.Name, count)
+		requeue = probeBackoff(count)
+		msg := formatProbeMessage("EventService probe failed: "+normaliseProbeError(err), requeue)
+		if err2 := r.setSchemaDetectedCondition(ctx, metricsTel, false, msg); err2 != nil {
 			log.Error(err2, "Failed to update SchemaDetected condition")
 		}
-		if err2 := r.setSchemaDetectedCondition(ctx, alertsTel, false, err.Error()); err2 != nil {
+		if err2 := r.setSchemaDetectedCondition(ctx, alertsTel, false, msg); err2 != nil {
 			log.Error(err2, "Failed to update SchemaDetected condition")
 		}
-		return "", "", "", sse.VendorConfig{}, 5 * time.Minute
+		if err2 := r.setConnectedCondition(ctx, metricsTel, false, "ProbeFailed"); err2 != nil {
+			log.Error(err2, "Failed to update Connected condition")
+		}
+		if err2 := r.setConnectedCondition(ctx, alertsTel, false, "ProbeFailed"); err2 != nil {
+			log.Error(err2, "Failed to update Connected condition")
+		}
+		return "", "", "", sse.VendorConfig{}, requeue
 	}
 
+	r.probeFailures.Delete(bmc.Name)
 	if err2 := r.setSchemaDetectedCondition(ctx, metricsTel, true, "EventService probed successfully"); err2 != nil {
 		log.Error(err2, "Failed to update SchemaDetected condition")
 	}
@@ -449,14 +468,19 @@ func (r *BMCReconciler) updateTelemetryStatus(ctx context.Context, tel *telemetr
 }
 
 // setSchemaDetectedCondition updates the SchemaDetected condition on the BMCTelemetry.
+// It is a no-op when the existing condition already has the same Status and Reason.
 func (r *BMCReconciler) setSchemaDetectedCondition(ctx context.Context, tel *telemetryv1alpha1.BMCTelemetry, ok bool, msg string) error {
-	patch := client.MergeFrom(tel.DeepCopy())
 	status := metav1.ConditionTrue
 	reason := "Probed"
 	if !ok {
 		status = metav1.ConditionFalse
 		reason = "ProbeFailed"
 	}
+	existing := meta.FindStatusCondition(tel.Status.Conditions, telemetryv1alpha1.ConditionSchemaDetected)
+	if existing != nil && existing.Status == status && existing.Reason == reason {
+		return nil
+	}
+	patch := client.MergeFrom(tel.DeepCopy())
 	meta.SetStatusCondition(&tel.Status.Conditions, metav1.Condition{
 		Type:               telemetryv1alpha1.ConditionSchemaDetected,
 		Status:             status,
@@ -465,6 +489,67 @@ func (r *BMCReconciler) setSchemaDetectedCondition(ctx context.Context, tel *tel
 		LastTransitionTime: metav1.Now(),
 	})
 	return r.Status().Patch(ctx, tel, patch)
+}
+
+// setConnectedCondition updates the Connected condition and (on failure) the ConnectionState
+// on the BMCTelemetry. It is a no-op when the condition and ConnectionState are already correct.
+func (r *BMCReconciler) setConnectedCondition(ctx context.Context, tel *telemetryv1alpha1.BMCTelemetry, connected bool, reason string) error {
+	condStatus := metav1.ConditionFalse
+	if connected {
+		condStatus = metav1.ConditionTrue
+	}
+	existing := meta.FindStatusCondition(tel.Status.Conditions, telemetryv1alpha1.ConditionConnected)
+	alreadySet := existing != nil && existing.Status == condStatus && existing.Reason == reason
+	if !connected {
+		alreadySet = alreadySet && tel.Status.ConnectionState == telemetryv1alpha1.ConnectionStateProbeBackoff
+	}
+	if alreadySet {
+		return nil
+	}
+	patch := client.MergeFrom(tel.DeepCopy())
+	meta.SetStatusCondition(&tel.Status.Conditions, metav1.Condition{
+		Type:               telemetryv1alpha1.ConditionConnected,
+		Status:             condStatus,
+		Reason:             reason,
+		LastTransitionTime: metav1.Now(),
+	})
+	if !connected {
+		tel.Status.ConnectionState = telemetryv1alpha1.ConnectionStateProbeBackoff
+	}
+	return r.Status().Patch(ctx, tel, patch)
+}
+
+var (
+	httpGetRe = regexp.MustCompile(`^Get "https?://[^"]+": `)
+	tcpAddrRe = regexp.MustCompile(`read tcp [^:]+:\d+->[^:]+:\d+: `)
+)
+
+func normaliseProbeError(err error) string {
+	s := err.Error()
+	s = httpGetRe.ReplaceAllString(s, "")
+	s = tcpAddrRe.ReplaceAllString(s, "")
+	return s
+}
+
+func formatProbeMessage(msg string, requeue time.Duration) string {
+	mins := int(requeue.Minutes())
+	if mins < 1 {
+		mins = 1
+	}
+	return fmt.Sprintf("%s (next retry in ~%dm)", msg, mins)
+}
+
+func probeBackoff(failures int) time.Duration {
+	switch {
+	case failures <= 1:
+		return 5 * time.Minute
+	case failures == 2:
+		return 10 * time.Minute
+	case failures == 3:
+		return 20 * time.Minute
+	default:
+		return 30 * time.Minute
+	}
 }
 
 // sse.StatusWriter implementation — the reconciler itself acts as the status writer

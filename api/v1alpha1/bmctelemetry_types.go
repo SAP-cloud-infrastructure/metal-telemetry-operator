@@ -35,7 +35,7 @@ const (
 )
 
 // ConnectionState describes the current SSE connection health.
-// +kubebuilder:validation:Enum=Connected;Reconnecting;Failed;SubscriptionActive;SlotsFull
+// +kubebuilder:validation:Enum=Connected;Reconnecting;Failed;SubscriptionActive;SlotsFull;ProbeBackoff
 type ConnectionState string
 
 const (
@@ -49,6 +49,8 @@ const (
 	ConnectionStateSubscriptionActive ConnectionState = "SubscriptionActive"
 	// ConnectionStateSlotsFull means the BMC has no free EventDestination subscription slots.
 	ConnectionStateSlotsFull ConnectionState = "SlotsFull"
+	// ConnectionStateProbeBackoff means the EventService probe is in exponential backoff after consecutive failures.
+	ConnectionStateProbeBackoff ConnectionState = "ProbeBackoff"
 )
 
 // StreamKind identifies which of the two monitored streams a BMCTelemetry resource represents.
