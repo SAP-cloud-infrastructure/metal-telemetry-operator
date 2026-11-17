@@ -251,10 +251,9 @@ func (r *Receiver) handleMetricReport(w http.ResponseWriter, req *http.Request) 
 			return
 		}
 		r.log.V(2).Info("Published MetricReport samples", "bmc", bmcName, "count", len(samples))
-	}
-
-	if r.cfg.StatusWriter != nil {
-		r.cfg.StatusWriter.RecordMetricReport(req.Context(), bmcName)
+		if r.cfg.StatusWriter != nil {
+			r.cfg.StatusWriter.RecordMetricReport(req.Context(), bmcName)
+		}
 	}
 	w.WriteHeader(http.StatusOK)
 }

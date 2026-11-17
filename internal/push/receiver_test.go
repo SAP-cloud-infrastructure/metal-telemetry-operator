@@ -194,6 +194,26 @@ func TestHandleMetricReport_statusWriter_called(t *testing.T) {
 	}
 }
 
+func TestHandleMetricReport_statusWriter_notCalledOnEmptySamples(t *testing.T) {
+	fs := &fakeSink{}
+	sw := &fakeStatusWriter{}
+	r := newTestReceiver(t, "sub1", fs)
+	r.SetStatusWriter(sw)
+
+	// Empty MetricValues — parses OK but yields 0 samples (e.g. BMC subscription handshake).
+	body := []byte(`{"MetricValues":[]}`)
+	req := httptest.NewRequest(http.MethodPost, "/serverevents/sub1/metricsreport/node99", bytes.NewReader(body))
+	w := httptest.NewRecorder()
+	r.Handler().ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Errorf("got status %d, want 200", w.Code)
+	}
+	if recorded := sw.recorded(); len(recorded) != 0 {
+		t.Errorf("expected StatusWriter not called for 0-sample POST, got %v", recorded)
+	}
+}
+
 func TestHandleMetricReport_noSubscriberID(t *testing.T) {
 	fs := &fakeSink{}
 	r := newTestReceiver(t, "", fs)
