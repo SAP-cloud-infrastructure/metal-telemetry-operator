@@ -5,7 +5,7 @@
 ### Requirement: Receiver accepts alert event POSTs
 The system SHALL accept HTTP POST requests from BMCs at the alerts endpoint, decode the Redfish Event payload (accepting both `Events` and `Alerts` top-level keys), and route decoded events to the alert pipeline. Real hardware events SHALL be published to the `EventSink`; test events identified by `ConsumeIfTest` SHALL be consumed for pipeline health tracking only without entering the alert pipeline.
 
-#### Scenario: Alert event POST processed and routed to EventSink
+#### Scenario: Alert event POST processed
 - **WHEN** a BMC POSTs a Redfish Event payload to the receiver's alerts endpoint and the event is not identified as a test event by `ConsumeIfTest`
 - **THEN** the system decodes the payload, extracts all events, and publishes them to the `EventSink` for severity-based routing
 

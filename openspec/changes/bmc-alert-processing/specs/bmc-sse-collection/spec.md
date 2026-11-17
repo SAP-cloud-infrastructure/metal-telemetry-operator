@@ -3,13 +3,13 @@
 ## MODIFIED Requirements
 
 ### Requirement: Persistent SSE connection per BMC
-The operator maintains one long-lived HTTP GET connection per SSE-capable BMC per stream kind. For `StreamKindMetrics` connections the operator streams `#MetricReport` format events; for `StreamKindAlerts` connections the operator streams `#Event` format events.
+The operator SHALL maintain one long-lived HTTP GET connection per SSE-capable BMC per stream kind. For `StreamKindMetrics` connections the operator streams `#MetricReport` format events; for `StreamKindAlerts` connections the operator streams `#Event` format events.
 
 #### Scenario: SSE connection established
 - **WHEN** a BMC is detected as SSE-capable with a valid SSE URI and credentials
 - **THEN** the operator opens an HTTP GET to the appropriate SSE URL (metrics or alerts) with TLS and Basic Auth, and begins consuming the event stream
 
-#### Scenario: SSE stream delivers MetricReport event on metrics connection
+#### Scenario: SSE stream delivers MetricReport event
 - **WHEN** an SSE event with `@odata.type` matching `#MetricReport.*` arrives on a `StreamKindMetrics` connection
 - **THEN** the operator parses the event body and forwards MetricValues to the metric sink
 
@@ -21,7 +21,7 @@ The operator maintains one long-lived HTTP GET connection per SSE-capable BMC pe
 - **WHEN** an SSE `#Event.*` frame arrives on a `StreamKindAlerts` connection and its MessageId is identified as a test event by `ConsumeIfTest`
 - **THEN** the system records the pipeline round-trip health metric and does NOT publish the event to the `EventSink`
 
-#### Scenario: Non-MetricReport event on metrics connection discarded
+#### Scenario: SSE stream delivers non-MetricReport event
 - **WHEN** an SSE event with `@odata.type` NOT matching `#MetricReport.*` arrives on a `StreamKindMetrics` connection
 - **THEN** the operator discards the event without publishing metrics or logging an error
 

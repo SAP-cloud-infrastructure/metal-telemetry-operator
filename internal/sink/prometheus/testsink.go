@@ -12,6 +12,8 @@ import (
 const (
 	pipelineTestResultName    = "event_pipeline_test_last_result"
 	pipelineTestTimestampName = "event_pipeline_test_timestamp"
+	labelResult               = "result"
+	testResultSuccess         = "success"
 )
 
 // TestEventSink records the most recent pipeline health-check result per BMC
@@ -45,7 +47,7 @@ func NewTestEventSink(reg prometheus.Registerer) (*TestEventSink, error) {
 		Namespace: metricNamespace,
 		Name:      pipelineTestTimestampName,
 		Help:      "Unix timestamp (seconds) of the last successful end-to-end pipeline health-check per BMC.",
-	}, []string{labelHostname, "result"})
+	}, []string{labelHostname, labelResult})
 	if err := reg.Register(s.timestamp); err != nil {
 		return nil, err
 	}
@@ -54,7 +56,7 @@ func NewTestEventSink(reg prometheus.Registerer) (*TestEventSink, error) {
 
 func (s *TestEventSink) RecordTestResult(bmcName, result string) {
 	var v float64
-	if result == "success" {
+	if result == testResultSuccess {
 		v = 1
 	}
 
@@ -62,8 +64,8 @@ func (s *TestEventSink) RecordTestResult(bmcName, result string) {
 	defer s.mu.Unlock()
 	s.tracked[bmcName] = struct{}{}
 	s.gauge.With(prometheus.Labels{labelHostname: bmcName}).Set(v)
-	if result == "success" {
-		s.timestamp.With(prometheus.Labels{labelHostname: bmcName, "result": "success"}).SetToCurrentTime()
+	if result == testResultSuccess {
+		s.timestamp.With(prometheus.Labels{labelHostname: bmcName, labelResult: testResultSuccess}).SetToCurrentTime()
 	}
 }
 
@@ -73,5 +75,5 @@ func (s *TestEventSink) Forget(bmcName string) {
 	defer s.mu.Unlock()
 	delete(s.tracked, bmcName)
 	s.gauge.Delete(prometheus.Labels{labelHostname: bmcName})
-	s.timestamp.Delete(prometheus.Labels{labelHostname: bmcName, "result": "success"})
+	s.timestamp.Delete(prometheus.Labels{labelHostname: bmcName, labelResult: testResultSuccess})
 }
