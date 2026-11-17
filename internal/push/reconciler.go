@@ -47,7 +47,7 @@ type Client interface {
 	CreateEventSubscription(ctx context.Context, destination, eventFormatType string, httpHeaders map[string]string) (string, error)
 	DeleteEventSubscription(ctx context.Context, uri string) error
 	ListEventSubscriptions(ctx context.Context) ([]Subscription, error)
-	SubmitTestEvent(ctx context.Context, messageId string) error
+	SubmitTestEvent(ctx context.Context, params TestEventParams) error
 	Close()
 }
 
@@ -76,14 +76,16 @@ type ReconcilerConfig struct {
 	SubscriptionHeaders map[string]string
 	// Factory creates Redfish clients; defaults to the production HTTPS client.
 	Factory ClientFactory
-	// TestEventInterval is the cadence for health-check test events.
-	// Zero or negative disables the heartbeat.
+	// ConfigLoader returns the current push config for dynamic per-vendor test
+	// event parameters and reconcile intervals. When nil or when it returns nil,
+	// the static fallback fields below are used.
+	ConfigLoader func() *Config
+	// TestEventInterval is the static fallback cadence for health-check test
+	// events. Zero or negative disables the heartbeat when ConfigLoader is
+	// also not set.
 	TestEventInterval time.Duration
-	// TestEventMessageId is the Redfish MessageId sent for health-check test events.
-	// Defaults to "Base.1.0.TestMessage".
-	TestEventMessageId string
-	// TestEventTimeout is how long to wait for the test event to arrive back.
-	// Defaults to 30 seconds.
+	// TestEventTimeout is the static fallback for how long to wait for the
+	// test event to arrive back. Defaults to 30 seconds.
 	TestEventTimeout time.Duration
 	Log              logr.Logger
 }
@@ -178,7 +180,7 @@ func (r *SubscriptionReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		}
 		return ctrl.Result{}, fmt.Errorf("ensure push subscriptions for %q: %w", req.Name, err)
 	}
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: r.effectiveReconcileInterval()}, nil
 }
 
 func (r *SubscriptionReconciler) setConnState(ctx context.Context, name string, state telemetryv1alpha1.ConnectionState) {
@@ -259,7 +261,7 @@ func (r *SubscriptionReconciler) ensureSubscriptions(ctx context.Context, bmc *m
 		log.Info("Created alerts push subscription", "uri", uri)
 	}
 	r.setConnState(ctx, bmc.Name+"-alerts", telemetryv1alpha1.ConnectionStateSubscriptionActive)
-	r.maybeRunTestEvent(ctx, rc, bmc.Name)
+	r.maybeRunTestEvent(ctx, rc, bmc.Name, bmc.Status.Manufacturer, bmc.Status.Model)
 	return nil
 }
 
@@ -349,24 +351,70 @@ func (r *SubscriptionReconciler) fetchCredentials(ctx context.Context, bmc *meta
 // ---------------------------------------------------------------------------
 
 const (
-	defaultTestEventInterval = 5 * time.Minute
-	defaultTestEventTimeout  = 30 * time.Second
-	defaultTestMessageID     = "Base.1.0.TestMessage"
+	defaultTestEventInterval  = 5 * time.Minute
+	defaultTestEventTimeout   = 30 * time.Second
+	defaultReconcileInterval  = 10 * time.Minute
 )
 
 // testEntry tracks an in-flight heartbeat test event for one BMC.
 type testEntry struct {
-	messageId string
-	deadline  time.Time
+	params   TestEventParams
+	deadline time.Time
+}
+
+func (r *SubscriptionReconciler) effectiveReconcileInterval() time.Duration {
+	if r.cfg.ConfigLoader != nil {
+		if cfg := r.cfg.ConfigLoader(); cfg != nil && cfg.ReconcileInterval.Duration > 0 {
+			return cfg.ReconcileInterval.Duration
+		}
+	}
+	if r.cfg.TestEventInterval > 0 {
+		return r.cfg.TestEventInterval
+	}
+	return defaultReconcileInterval
+}
+
+func (r *SubscriptionReconciler) effectiveTestInterval() time.Duration {
+	if r.cfg.ConfigLoader != nil {
+		if cfg := r.cfg.ConfigLoader(); cfg != nil && cfg.TestEventInterval.Duration > 0 {
+			return cfg.TestEventInterval.Duration
+		}
+	}
+	if r.cfg.TestEventInterval > 0 {
+		return r.cfg.TestEventInterval
+	}
+	return defaultTestEventInterval
+}
+
+func (r *SubscriptionReconciler) effectiveTestTimeout() time.Duration {
+	if r.cfg.ConfigLoader != nil {
+		if cfg := r.cfg.ConfigLoader(); cfg != nil && cfg.TestEventTimeout.Duration > 0 {
+			return cfg.TestEventTimeout.Duration
+		}
+	}
+	if r.cfg.TestEventTimeout > 0 {
+		return r.cfg.TestEventTimeout
+	}
+	return defaultTestEventTimeout
+}
+
+func (r *SubscriptionReconciler) effectiveTestParams(vendor, model string) TestEventParams {
+	if r.cfg.ConfigLoader != nil {
+		if cfg := r.cfg.ConfigLoader(); cfg != nil {
+			return cfg.TestParamsFor(vendor, model)
+		}
+	}
+	return DefaultTestEventParams()
 }
 
 // maybeRunTestEvent fires a SubmitTestEvent if the per-BMC heartbeat cadence
-// has elapsed since the last send. Errors are logged but never surfaced to the
-// caller — a failed test event just means the next reconcile will retry.
-func (r *SubscriptionReconciler) maybeRunTestEvent(ctx context.Context, rc Client, bmcName string) {
-	interval := r.cfg.TestEventInterval
+// has elapsed since the last send. Stale in-flight entries (past their deadline)
+// are recorded as timeouts before a new test is fired. Errors are logged but
+// never surfaced to the caller.
+func (r *SubscriptionReconciler) maybeRunTestEvent(ctx context.Context, rc Client, bmcName, vendor, model string) {
+	interval := r.effectiveTestInterval()
 	if interval <= 0 {
-		interval = defaultTestEventInterval
+		return
 	}
 	now := time.Now()
 	if v, ok := r.lastTestTime.Load(bmcName); ok {
@@ -375,30 +423,40 @@ func (r *SubscriptionReconciler) maybeRunTestEvent(ctx context.Context, rc Clien
 		}
 	}
 
-	timeout := r.cfg.TestEventTimeout
-	if timeout <= 0 {
-		timeout = defaultTestEventTimeout
+	// Handle any in-flight entry that is still within its deadline.
+	if v, ok := r.testPending.Load(bmcName); ok {
+		if entry, ok := v.(testEntry); ok {
+			if now.Before(entry.deadline) {
+				return // prior test still pending, wait for it
+			}
+			// Deadline passed — record timeout before firing another.
+			r.testPending.Delete(bmcName)
+			if r.TestRecorder != nil {
+				r.TestRecorder.RecordTestResult(bmcName, "timeout")
+			}
+			r.log.V(2).Info("Test event timed out", "bmc", bmcName)
+		}
 	}
-	msgID := r.cfg.TestEventMessageId
-	if msgID == "" {
-		msgID = defaultTestMessageID
-	}
-	if err := rc.SubmitTestEvent(ctx, msgID); err != nil {
+
+	params := r.effectiveTestParams(vendor, model)
+	timeout := r.effectiveTestTimeout()
+
+	if err := rc.SubmitTestEvent(ctx, params); err != nil {
 		r.log.V(1).Info("SubmitTestEvent failed", "bmc", bmcName, "err", err.Error())
 		return
 	}
 	r.lastTestTime.Store(bmcName, now)
 	r.testPending.Store(bmcName, testEntry{
-		messageId: msgID,
-		deadline:  now.Add(timeout),
+		params:   params,
+		deadline: now.Add(timeout),
 	})
-	r.log.V(2).Info("Sent test event", "bmc", bmcName, "messageId", msgID)
+	r.log.V(2).Info("Sent test event", "bmc", bmcName, "messageId", params.MessageId)
 }
 
-// ConsumeIfTest implements the ConsumeIfTest interface. It returns true when
-// messageId matches the in-flight test event for bmcName and the deadline has
-// not yet passed, records the pipeline health metric, and removes the entry.
-// Returns false for all other events so they flow through the normal pipeline.
+// ConsumeIfTest returns true when messageId matches the in-flight test event
+// for bmcName and the deadline has not yet passed, records the pipeline health
+// metric, and removes the entry. Returns false for all other events so they
+// flow through the normal pipeline.
 func (r *SubscriptionReconciler) ConsumeIfTest(bmcName, messageId string) bool {
 	v, ok := r.testPending.Load(bmcName)
 	if !ok {
@@ -408,7 +466,7 @@ func (r *SubscriptionReconciler) ConsumeIfTest(bmcName, messageId string) bool {
 	if !ok {
 		return false
 	}
-	if entry.messageId != messageId {
+	if entry.params.MessageId != messageId {
 		return false
 	}
 	r.testPending.Delete(bmcName)
@@ -421,6 +479,21 @@ func (r *SubscriptionReconciler) ConsumeIfTest(bmcName, messageId string) bool {
 	}
 	r.log.V(2).Info("Test event round-trip completed", "bmc", bmcName, "result", result)
 	return true
+}
+
+// FireTestEvent submits a SubmitTestEvent for a BMC in SSE mode. It creates a
+// temporary Redfish client using the supplied credentials, then delegates to
+// maybeRunTestEvent so the same interval/timeout/vendor-params logic applies.
+// Errors from client creation are returned; SubmitTestEvent failures are logged
+// but not returned (best-effort heartbeat).
+func (r *SubscriptionReconciler) FireTestEvent(ctx context.Context, bmcName, host, username, password, vendor, model string) error {
+	rc, err := r.cfg.Factory.NewClient(ctx, host, username, password)
+	if err != nil {
+		return fmt.Errorf("create Redfish client for SSE test event %q: %w", bmcName, err)
+	}
+	defer rc.Close()
+	r.maybeRunTestEvent(ctx, rc, bmcName, vendor, model)
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -568,17 +641,17 @@ func (c *redfishClient) DeleteEventSubscription(ctx context.Context, uri string)
 	return nil
 }
 
-func (c *redfishClient) SubmitTestEvent(ctx context.Context, messageId string) error {
+func (c *redfishClient) SubmitTestEvent(ctx context.Context, params TestEventParams) error {
 	// HPE iLO 7 requires all fields; other vendors accept a minimal payload.
 	// OriginOfCondition must be a plain string on HPE (not a {"@odata.id":"..."} link).
 	payload := map[string]any{
-		"MessageId":         messageId,
+		"MessageId":         params.MessageId,
 		"EventId":           "1",
 		"EventTimestamp":    time.Now().UTC().Format(time.RFC3339),
 		"Message":           "Redfish pipeline health check",
 		"MessageArgs":       []string{},
-		"Severity":          "OK",
-		"OriginOfCondition": "/redfish/v1/Managers/1",
+		"Severity":          params.Severity,
+		"OriginOfCondition": params.OriginOfCondition,
 	}
 	rawBody, err := json.Marshal(payload)
 	if err != nil {

@@ -4,6 +4,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"os"
@@ -53,8 +54,8 @@ func main() {
 	var pushReceiverURL string
 	var pushEventsAddr string
 	var pushSubscriberID string
-	var pushConfigName string
-	var pushConfigNamespace string
+	var bmcConfigName string
+	var bmcConfigNamespace string
 	var pushSharedSecretName string
 	tlsOpts := make([]func(*tls.Config), 0, 1)
 
@@ -74,12 +75,12 @@ func main() {
 		"HTTP listen address for the push MetricReport receiver.")
 	flag.StringVar(&pushSubscriberID, "push-subscriber-id", "",
 		"Subscriber ID used to scope EventDestination paths. Should be unique per deployment.")
-	flag.StringVar(&pushConfigName, "push-config-name", "",
-		"Name of the ConfigMap holding push mode overrides and exclusion rules.")
-	flag.StringVar(&pushConfigNamespace, "push-config-namespace", "",
-		"Namespace of the push config ConfigMap.")
+	flag.StringVar(&bmcConfigName, "bmc-config-name", "",
+		"Name of the ConfigMap holding BMC telemetry overrides and test alert config.")
+	flag.StringVar(&bmcConfigNamespace, "bmc-config-namespace", "",
+		"Namespace of the BMC config ConfigMap.")
 	flag.StringVar(&pushSharedSecretName, "push-events-shared-secret-name", "",
-		"Name of a Kubernetes Secret (in push-config-namespace) holding a 32-byte shared key "+
+		"Name of a Kubernetes Secret (in bmc-config-namespace) holding a 32-byte shared key "+
 			"used to authenticate incoming Redfish event POSTs. The Secret is created automatically "+
 			"on first start if it does not exist. When set, BMCs must include "+
 			"\"Authorization: Bearer <hex(key)>\" in every event POST. "+
@@ -103,10 +104,10 @@ func main() {
 	// config namespace. Without this, GetInformer registers a cluster-scoped watch
 	// requiring cluster-wide list/watch RBAC that the operator does not have.
 	cacheOpts := cache.Options{}
-	if pushConfigNamespace != "" {
+	if bmcConfigNamespace != "" {
 		cacheOpts.ByObject = map[client.Object]cache.ByObject{
 			&corev1.ConfigMap{}: {
-				Namespaces: map[string]cache.Config{pushConfigNamespace: {}},
+				Namespaces: map[string]cache.Config{bmcConfigNamespace: {}},
 			},
 		}
 	}
@@ -131,12 +132,12 @@ func main() {
 
 	// Build the push config loader when config coordinates are provided.
 	var pushLoader *push.ConfigLoader
-	if pushConfigName != "" && pushConfigNamespace != "" {
+	if bmcConfigName != "" && bmcConfigNamespace != "" {
 		pushLoader = &push.ConfigLoader{
 			Cache:     mgr.GetCache(),
 			Client:    mgr.GetClient(),
-			Namespace: pushConfigNamespace,
-			Name:      pushConfigName,
+			Namespace: bmcConfigNamespace,
+			Name:      bmcConfigName,
 			Log:       setupLog.WithName("push-config"),
 		}
 		if err := mgr.Add(pushLoader); err != nil {
@@ -167,23 +168,29 @@ func main() {
 
 	if pushEventsAddr != "" && pushReceiverURL != "" {
 		var sseTestFilter push.ConsumeIfTest
+		var sseFirer func(ctx context.Context, bmcName, host, username, password, vendor, model string) error
 		if err := push.AddTo(mgr, &push.Options{
 			ReceiverURL:      pushReceiverURL,
 			EventsAddr:       pushEventsAddr,
 			SubscriberID:     pushSubscriberID,
-			ConfigName:       pushConfigName,
-			ConfigNamespace:  pushConfigNamespace,
+			BmcConfigName:    bmcConfigName,
+			BmcConfigNamespace: bmcConfigNamespace,
 			SharedSecretName: pushSharedSecretName,
 			Sink:             sharedSink,
 			EventSink:        bmcReconciler.AlertEventSink,
 			StatusWriter:     bmcReconciler,
 			TestRecorder:     bmcReconciler.TestSink(),
 			ConsumeIfTestOut: &sseTestFilter,
+			SSETestFirerOut:  &sseFirer,
+			ConfigLoader:     pushLoader,
 		}); err != nil {
 			setupLog.Error(err, "Failed to set up push pipeline")
 			os.Exit(1)
 		}
 		bmcReconciler.SetSSETestFilter(sseTestFilter)
+		if sseFirer != nil {
+			bmcReconciler.SetSSETestFirer(sseFirer)
+		}
 	}
 	// +kubebuilder:scaffold:builder
 

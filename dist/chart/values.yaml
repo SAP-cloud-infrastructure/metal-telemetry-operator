@@ -29,8 +29,8 @@ manager:
     - --push-events-addr={{ .Values.push.eventsAddr }}
     - --push-receiver-url={{ .Values.push.receiverURL }}
     - --push-subscriber-id={{ .Values.push.subscriberID }}
-    - --push-config-name={{ .Values.push.configName }}
-    - --push-config-namespace={{ .Values.push.configNamespace }}
+    - --bmc-config-name={{ .Values.push.bmcConfigName }}
+    - --bmc-config-namespace={{ .Values.push.bmcConfigNamespace }}
     - --push-events-shared-secret-name={{ .Values.push.sharedSecretName }}
 
   ## Environment variables for the manager container
@@ -263,20 +263,20 @@ push:
   ##
   subscriberID: ""
 
-  ## Name of the ConfigMap holding push mode overrides and exclusion rules.
+  ## Name of the ConfigMap holding BMC telemetry overrides and test alert config.
   ##
-  configName: ""
+  bmcConfigName: ""
 
-  ## Namespace of the push config ConfigMap.
+  ## Namespace of the BMC config ConfigMap.
   ##
-  configNamespace: ""
+  bmcConfigNamespace: ""
 
   ## Name of a Kubernetes Secret holding a 32-byte shared key used to
   ## authenticate incoming Redfish event POSTs. The operator creates the Secret
   ## automatically on first start if it does not exist. When set, BMCs must
   ## include "Authorization: Bearer <hex(key)>" in every event POST; the same
   ## token is added to Redfish subscription HttpHeaders automatically.
-  ## Requires push.configNamespace to be set (the Secret is created there).
+  ## Requires push.bmcConfigNamespace to be set (the Secret is created there).
   ## When empty, the receiver accepts unauthenticated POSTs.
   ##
   sharedSecretName: ""

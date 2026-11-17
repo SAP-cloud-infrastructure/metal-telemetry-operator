@@ -82,7 +82,9 @@ func (f *fakeRedfishClient) DeleteEventSubscription(_ context.Context, uri strin
 	return nil
 }
 
-func (f *fakeRedfishClient) SubmitTestEvent(_ context.Context, _ string) error { return nil }
+func (f *fakeRedfishClient) SubmitTestEvent(_ context.Context, _ push.TestEventParams) error {
+	return nil
+}
 
 func (f *fakeRedfishClient) Close() {}
 
@@ -475,7 +477,7 @@ func TestSubscriptionReconciler_perStreamConnectionState(t *testing.T) {
 			name:             "both succeed",
 			wantMetricsState: telemetryv1alpha1.ConnectionStateSubscriptionActive,
 			wantAlertsState:  telemetryv1alpha1.ConnectionStateSubscriptionActive,
-			wantRequeue:      false,
+			wantRequeue:      true,
 		},
 		{
 			name:             "metrics slots full",

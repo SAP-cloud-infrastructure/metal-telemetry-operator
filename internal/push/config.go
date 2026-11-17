@@ -12,6 +12,7 @@ import (
 	"errors"
 	"fmt"
 	"sync/atomic"
+	"time"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
@@ -44,6 +45,98 @@ type Config struct {
 	// ModeOverrides maps vendor/model patterns to a forced TelemetryMode,
 	// overriding auto-detection for matching BMCs.
 	ModeOverrides []ModeOverrideRule `yaml:"modeOverrides,omitempty"`
+
+	// ReconcileInterval is the cadence at which the push reconciler re-runs
+	// per BMC for subscription verification. Defaults to 10 minutes when zero.
+	ReconcileInterval Duration `yaml:"reconcileInterval,omitempty"`
+
+	// TestEventInterval is how often to fire a SubmitTestEvent heartbeat per BMC.
+	// Defaults to ReconcileInterval when zero.
+	TestEventInterval Duration `yaml:"testEventInterval,omitempty"`
+
+	// TestEventTimeout is how long to wait for a SubmitTestEvent round-trip
+	// before recording a timeout result. Defaults to 30s when zero.
+	TestEventTimeout Duration `yaml:"testEventTimeout,omitempty"`
+
+	// TestEventOverrides provides per-vendor SubmitTestEvent parameters. The
+	// first matching rule wins. When no rule matches, Base.1.0.TestMessage with
+	// default severity and origin is used.
+	TestEventOverrides []TestEventOverrideRule `yaml:"testEventOverrides,omitempty"`
+}
+
+// Duration wraps time.Duration to support YAML parsing of human-readable
+// duration strings like "10m", "30s".
+type Duration struct{ time.Duration }
+
+func (d *Duration) UnmarshalYAML(unmarshal func(any) error) error {
+	var s string
+	if err := unmarshal(&s); err != nil {
+		return err
+	}
+	dur, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("invalid duration %q: %w", s, err)
+	}
+	d.Duration = dur
+	return nil
+}
+
+// TestEventOverrideRule provides per-vendor SubmitTestEvent parameters.
+type TestEventOverrideRule struct {
+	// Vendor must match bmc.Status.Manufacturer (e.g. "HPE", "Dell Inc.").
+	Vendor string `yaml:"vendor"`
+	// Models lists bmc.Status.Model values to match; ["*"] matches all models.
+	Models []string `yaml:"models"`
+	// MessageId is the Redfish MessageId sent in SubmitTestEvent.
+	MessageId string `yaml:"messageId"`
+	// Severity is the Severity field sent in SubmitTestEvent. Defaults to "OK".
+	Severity string `yaml:"severity,omitempty"`
+	// OriginOfCondition is sent as a plain string. Defaults to "/redfish/v1/Managers/1".
+	OriginOfCondition string `yaml:"originOfCondition,omitempty"`
+}
+
+// TestEventParams holds the per-vendor parameters for a SubmitTestEvent call.
+type TestEventParams struct {
+	MessageId         string
+	Severity          string
+	OriginOfCondition string
+}
+
+// DefaultTestEventParams returns the baseline params used when no vendor rule matches.
+func DefaultTestEventParams() TestEventParams {
+	return TestEventParams{
+		MessageId:         "Base.1.0.TestMessage",
+		Severity:          "OK",
+		OriginOfCondition: "/redfish/v1/Managers/1",
+	}
+}
+
+// TestParamsFor returns the SubmitTestEvent parameters for the given vendor and
+// model, applying the first matching override rule. Returns the default params
+// when no rule matches.
+func (c *Config) TestParamsFor(vendor, model string) TestEventParams {
+	for _, ov := range c.TestEventOverrides {
+		if ov.Vendor != vendor {
+			continue
+		}
+		for _, m := range ov.Models {
+			if m == "*" || m == model {
+				p := TestEventParams{
+					MessageId:         ov.MessageId,
+					Severity:          ov.Severity,
+					OriginOfCondition: ov.OriginOfCondition,
+				}
+				if p.Severity == "" {
+					p.Severity = "OK"
+				}
+				if p.OriginOfCondition == "" {
+					p.OriginOfCondition = "/redfish/v1/Managers/1"
+				}
+				return p
+			}
+		}
+	}
+	return DefaultTestEventParams()
 }
 
 // ExcludeHardwareRule opts a vendor/model combination out of telemetry collection.

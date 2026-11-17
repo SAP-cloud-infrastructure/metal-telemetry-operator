@@ -10,7 +10,7 @@ import "time"
 // the real Redfish endpoint.
 func (r *SubscriptionReconciler) SetTestPending(bmcName, messageId string, timeoutSecs int) {
 	r.testPending.Store(bmcName, testEntry{
-		messageId: messageId,
-		deadline:  time.Now().Add(time.Duration(timeoutSecs) * time.Second),
+		params:   TestEventParams{MessageId: messageId, Severity: "OK", OriginOfCondition: "/redfish/v1/Managers/1"},
+		deadline: time.Now().Add(time.Duration(timeoutSecs) * time.Second),
 	})
 }

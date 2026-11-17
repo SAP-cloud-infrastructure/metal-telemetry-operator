@@ -80,6 +80,10 @@ type BMCReconciler struct {
 
 	// probeFailures tracks consecutive EventService probe failures per BMC (key: BMC name, value: int).
 	probeFailures sync.Map
+
+	// sseTestFirer fires a Redfish SubmitTestEvent for SSE-mode BMCs on each
+	// periodic reconcile. Nil until SetSSETestFirer is called from main.go.
+	sseTestFirer func(ctx context.Context, bmcName, host, username, password, vendor, model string) error
 }
 
 // SetupWithManager initializes the reconciler and registers it with the manager.
@@ -189,6 +193,13 @@ func (r *BMCReconciler) SetupWithManager(mgr ctrl.Manager) error {
 // connection manager. Called from main.go after push.AddTo returns.
 func (r *BMCReconciler) SetSSETestFilter(tf sse.ConsumeIfTest) {
 	r.connMgr.SetTestFilter(tf)
+}
+
+// SetSSETestFirer wires the push reconciler's FireTestEvent into the BMC
+// reconciler so SSE-mode BMCs receive periodic heartbeat test events on the
+// same cadence as push-mode BMCs.
+func (r *BMCReconciler) SetSSETestFirer(f func(ctx context.Context, bmcName, host, username, password, vendor, model string) error) {
+	r.sseTestFirer = f
 }
 
 // TestSink returns the pipeline health-check sink so main.go can pass it to
@@ -303,7 +314,17 @@ func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	if err := r.updateTelemetryStatus(ctx, metricsTel, telemetryv1alpha1.TelemetryModeSSE, vendorCfg, metricsTel.Status.ConnectionState); err != nil {
 		return ctrl.Result{}, err
 	}
-	return ctrl.Result{}, r.updateTelemetryStatus(ctx, alertsTel, telemetryv1alpha1.TelemetryModeSSE, vendorCfg, alertsTel.Status.ConnectionState)
+	if err := r.updateTelemetryStatus(ctx, alertsTel, telemetryv1alpha1.TelemetryModeSSE, vendorCfg, alertsTel.Status.ConnectionState); err != nil {
+		return ctrl.Result{}, err
+	}
+
+	if r.sseTestFirer != nil {
+		if fireErr := r.sseTestFirer(ctx, bmc.Name, host, username, password, bmc.Status.Manufacturer, bmc.Status.Model); fireErr != nil {
+			log.V(1).Info("SSE test event firer failed (non-fatal)", "bmc", bmc.Name, "err", fireErr)
+		}
+	}
+
+	return ctrl.Result{RequeueAfter: r.effectiveSSERequeueInterval()}, nil
 }
 
 // probeEventServiceForBMC fetches credentials, validates the BMC IP, probes the Redfish
@@ -649,6 +670,18 @@ func (r *BMCReconciler) RecordAlertEvent(ctx context.Context, bmcName string) {
 
 // Ensure BMCReconciler satisfies the push.StatusWriter interface at compile time.
 var _ push.StatusWriter = (*BMCReconciler)(nil)
+
+// effectiveSSERequeueInterval returns the interval at which SSE-mode BMC
+// reconciles should repeat. Uses the push ConfigLoader's ReconcileInterval
+// when available, otherwise defaults to 10 minutes.
+func (r *BMCReconciler) effectiveSSERequeueInterval() time.Duration {
+	if r.ConfigLoader != nil {
+		if cfg := r.ConfigLoader.Config(); cfg != nil && cfg.ReconcileInterval.Duration > 0 {
+			return cfg.ReconcileInterval.Duration
+		}
+	}
+	return 10 * time.Minute
+}
 
 // prewarmAlertGauge restores the critical alert gauge state after a pod restart by
 // reading the CriticalEventReceived condition from every Server in the cache.

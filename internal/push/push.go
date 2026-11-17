@@ -26,10 +26,10 @@ type Options struct {
 	// SubscriberID scopes subscription destination paths to this instance.
 	// Should be unique per-operator deployment.
 	SubscriberID string
-	// ConfigName is the name of the ConfigMap holding mode overrides and exclusion rules.
-	ConfigName string
-	// ConfigNamespace is the namespace of the ConfigMap.
-	ConfigNamespace string
+	// BmcConfigName is the name of the ConfigMap holding BMC telemetry overrides and test alert config.
+	BmcConfigName string
+	// BmcConfigNamespace is the namespace of the ConfigMap.
+	BmcConfigNamespace string
 	// SharedSecretName, when non-empty, names a Kubernetes Secret (in ConfigNamespace)
 	// that holds a 32-byte shared key used to authenticate incoming Redfish event POSTs.
 	// The Secret is created automatically on first start if it does not exist.
@@ -58,6 +58,14 @@ type Options struct {
 	// reconciler's ConsumeIfTest implementation. Call BMCReconciler.SetSSETestFilter
 	// with this value after AddTo returns to wire the SSE path.
 	ConsumeIfTestOut *ConsumeIfTest
+	// SSETestFirerOut, when non-nil, is filled in by AddTo with the push
+	// reconciler's FireTestEvent method. Call BMCReconciler.SetSSETestFirer with
+	// this value after AddTo returns to enable SSE heartbeat test events.
+	SSETestFirerOut *func(ctx context.Context, bmcName, host, username, password, vendor, model string) error
+	// ConfigLoader provides live-reloaded push config (test event overrides,
+	// intervals, etc.) to the subscription reconciler. Typically the same
+	// instance wired to BMCReconciler.ConfigLoader.
+	ConfigLoader *ConfigLoader
 	// Log is the logger; defaults to the controller-runtime logger.
 	Log logr.Logger
 }
@@ -81,10 +89,10 @@ func AddTo(mgr ctrl.Manager, opts *Options) error {
 
 	var sharedSecret []byte
 	if opts.SharedSecretName != "" {
-		if opts.ConfigNamespace == "" {
-			return fmt.Errorf("push receiver shared secret requires ConfigNamespace to be set")
+		if opts.BmcConfigNamespace == "" {
+			return fmt.Errorf("push receiver shared secret requires BmcConfigNamespace to be set")
 		}
-		k, err := ensureHMACKey(context.Background(), mgr.GetClient(), opts.ConfigNamespace, opts.SharedSecretName)
+		k, err := ensureHMACKey(context.Background(), mgr.GetClient(), opts.BmcConfigNamespace, opts.SharedSecretName)
 		if err != nil {
 			return fmt.Errorf("provision push receiver shared secret: %w", err)
 		}
@@ -114,6 +122,9 @@ func AddTo(mgr ctrl.Manager, opts *Options) error {
 		SubscriberID: opts.SubscriberID,
 		Log:          log.WithName("reconciler"),
 	}
+	if opts.ConfigLoader != nil {
+		reconcilerCfg.ConfigLoader = opts.ConfigLoader.Config
+	}
 	if len(sharedSecret) > 0 {
 		reconcilerCfg.SubscriptionHeaders = map[string]string{
 			"Authorization": "Bearer " + receiver.BearerToken(),
@@ -129,6 +140,11 @@ func AddTo(mgr ctrl.Manager, opts *Options) error {
 	// Expose the reconciler as a ConsumeIfTest so the SSE path can filter test events.
 	if opts.ConsumeIfTestOut != nil {
 		*opts.ConsumeIfTestOut = reconciler
+	}
+
+	// Expose the reconciler's FireTestEvent so the SSE path can fire heartbeats.
+	if opts.SSETestFirerOut != nil {
+		*opts.SSETestFirerOut = reconciler.FireTestEvent
 	}
 
 	receiver.SetOnResourceRemoved(reconciler.EnqueueBMC)
