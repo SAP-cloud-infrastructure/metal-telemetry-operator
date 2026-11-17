@@ -74,6 +74,9 @@ type BMCReconciler struct {
 	connMgr         *sse.ConnectionManager
 	sinkInst        sink.MetricReportSink
 	criticalHandler *criticalevent.ConditionHandler
+	// testSink records pipeline health-check results. Exposed so main.go can pass
+	// it to push.AddTo; Forget is called in deletion paths.
+	testSink *prometheusSink.TestEventSink
 
 	// probeFailures tracks consecutive EventService probe failures per BMC (key: BMC name, value: int).
 	probeFailures sync.Map
@@ -130,12 +133,20 @@ func (r *BMCReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			r.AlertEventSink = es
 		}
 
+		ts, tsErr := prometheusSink.NewTestEventSink(ctrlmetrics.Registry)
+		if tsErr != nil {
+			initErr = fmt.Errorf("create test event sink: %w", tsErr)
+			return
+		}
+		r.testSink = ts
+
 		r.connMgr = sse.NewConnectionManager(
 			int64(r.MaxConcurrentConnects),
 			s,
 			r,                // BMCReconciler implements sse.StatusWriter
 			r.AlertEventSink, // routes SSE alert events through the same pipeline as push
-			nil,              // TestFilter: SSE heartbeat not yet implemented
+			nil,              // TestFilter: wired after push.AddTo via SetSSETestFilter
+			r.testSink,       // records pipeline health-check results
 			mgr.GetLogger().WithName("sse"),
 		)
 	})
@@ -174,6 +185,18 @@ func (r *BMCReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Complete(r)
 }
 
+// SetSSETestFilter wires the push reconciler's ConsumeIfTest into the SSE
+// connection manager. Called from main.go after push.AddTo returns.
+func (r *BMCReconciler) SetSSETestFilter(tf sse.ConsumeIfTest) {
+	r.connMgr.SetTestFilter(tf)
+}
+
+// TestSink returns the pipeline health-check sink so main.go can pass it to
+// push.AddTo for recording push-path round-trip results.
+func (r *BMCReconciler) TestSink() *prometheusSink.TestEventSink {
+	return r.testSink
+}
+
 // Reconcile drives the telemetry state for one BMC.
 func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
@@ -183,6 +206,7 @@ func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		if apierrors.IsNotFound(err) {
 			r.connMgr.StopBMC(req.Name)
 			r.sinkInst.Forget(req.Name)
+			r.testSink.Forget(req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -192,6 +216,7 @@ func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	if !bmc.DeletionTimestamp.IsZero() || bmc.Status.State != metalv1alpha1.BMCStateEnabled {
 		r.connMgr.StopBMC(bmc.Name)
 		r.sinkInst.Forget(bmc.Name)
+		r.testSink.Forget(bmc.Name)
 		if err := r.deleteOwnedTelemetry(ctx, bmc.Name); err != nil {
 			return ctrl.Result{}, err
 		}

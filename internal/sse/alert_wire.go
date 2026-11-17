@@ -20,6 +20,13 @@ type ConsumeIfTest interface {
 	ConsumeIfTest(bmcName, messageId string) bool
 }
 
+// TestResultRecorder records the outcome of a pipeline health-check round-trip.
+// Defined locally (same import-cycle reason as ConsumeIfTest).
+// *prometheusSink.TestEventSink satisfies this interface automatically.
+type TestResultRecorder interface {
+	RecordTestResult(bmcName, result string)
+}
+
 // alertWireEvent mirrors push.wireEvent but is local to the sse package.
 // Both Events[] and Alerts[] array members decode into this type.
 type alertWireEvent struct {

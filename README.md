@@ -51,6 +51,14 @@ count by (metric_id) (redfish_telemetry_reading)
 
 # Which metric_ids a specific BMC reports
 count by (metric_id) (redfish_telemetry_reading{hostname="<bmc-name>"})
+
+# Metric coverage by hardware manufacturer and model (requires kube-state-metrics integration)
+# Joins redfish_telemetry_reading with kube_ironcore_bmc_info to attach manufacturer/model labels
+count by (manufacturer, model, metric_id) (
+  redfish_telemetry_reading
+  * on(hostname) group_left(manufacturer, model)
+  label_replace(kube_ironcore_bmc_info, "hostname", "$1", "name", "(.*)")
+)
 ```
 
 ---

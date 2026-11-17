@@ -24,29 +24,40 @@ type connKey struct {
 // on the number of concurrent SSE connections to prevent thundering herd on
 // operator startup.
 type ConnectionManager struct {
-	mu         sync.Mutex
-	sem        *semaphore.Weighted
-	sink       sink.MetricReportSink
-	sw         StatusWriter
-	eventSink  sink.EventSink
-	testFilter ConsumeIfTest
-	log        logr.Logger
+	mu           sync.Mutex
+	sem          *semaphore.Weighted
+	sink         sink.MetricReportSink
+	sw           StatusWriter
+	eventSink    sink.EventSink
+	testFilter   ConsumeIfTest
+	testRecorder TestResultRecorder
+	log          logr.Logger
 
 	conns map[connKey]*sseConn
 }
 
 // NewConnectionManager creates a ConnectionManager that allows at most
 // maxConcurrent simultaneous active SSE connections.
-func NewConnectionManager(maxConcurrent int64, s sink.MetricReportSink, sw StatusWriter, es sink.EventSink, tf ConsumeIfTest, log logr.Logger) *ConnectionManager {
+func NewConnectionManager(maxConcurrent int64, s sink.MetricReportSink, sw StatusWriter, es sink.EventSink, tf ConsumeIfTest, tr TestResultRecorder, log logr.Logger) *ConnectionManager {
 	return &ConnectionManager{
-		sem:        semaphore.NewWeighted(maxConcurrent),
-		sink:       s,
-		sw:         sw,
-		eventSink:  es,
-		testFilter: tf,
-		log:        log,
-		conns:      make(map[connKey]*sseConn),
+		sem:          semaphore.NewWeighted(maxConcurrent),
+		sink:         s,
+		sw:           sw,
+		eventSink:    es,
+		testFilter:   tf,
+		testRecorder: tr,
+		log:          log,
+		conns:        make(map[connKey]*sseConn),
 	}
+}
+
+// SetTestFilter sets the ConsumeIfTest filter on the manager. Safe to call
+// after construction and before mgr.Start; used to wire the push reconciler
+// (created after the connection manager) without re-constructing the manager.
+func (m *ConnectionManager) SetTestFilter(tf ConsumeIfTest) {
+	m.mu.Lock()
+	m.testFilter = tf
+	m.mu.Unlock()
 }
 
 // Ensure starts or updates the SSE connection for the given ConnConfig.
@@ -86,6 +97,7 @@ func (m *ConnectionManager) Ensure(ctx context.Context, cfg ConnConfig) error {
 	}
 	cfg.EventSink = m.eventSink
 	cfg.TestFilter = m.testFilter
+	cfg.TestRecorder = m.testRecorder
 	conn := startConn(logr.NewContext(ctx, m.log), cfg, m.sink, m.sw)
 	// The semaphore slot is released when the connection goroutine exits.
 	go func() {

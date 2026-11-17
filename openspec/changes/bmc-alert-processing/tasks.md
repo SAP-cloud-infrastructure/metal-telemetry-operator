@@ -47,7 +47,7 @@
 - [x] 9.1 Add `EventSink sink.EventSink` and `TestFilter ConsumeIfTest` fields to `internal/sse/conn.go` `sseConn` struct and `ConnConfig`; update `startConn` signature to accept them; verify `go vet ./internal/sse/...`
 - [x] 9.2 Update `sseConn.handleEvent`: when `cfg.StreamKind == StreamKindAlerts` and `@odata.type` starts with `#Event.`, decode the payload using `eventEnvelope`, iterate events, call `TestFilter.ConsumeIfTest` per event; route real events to `cfg.EventSink.PublishEvents`; update `{bmc}-alerts LastEventTime` only for real events (skip test events); verify `go test ./internal/sse/` passes
 - [x] 9.3 Update `internal/sse/manager.go` `ConnectionManager.NewConnectionManager` and `Ensure` to pass `EventSink` and `ConsumeIfTest` through to `startConn`; wire them in `bmc_reconciler.go`; verify `go build ./...` and `make test` pass
-- [ ] 9.4 Integration smoke test: with a MetricReport-mode BMC in QA or local tilt cluster, verify `redfish_event_alert_total` increments and `redfish_server_critical_alert` reflects the Server condition after a test event round-trip and a real alert (or simulated alert via `SubmitTestEvent` with Critical severity); verify `LastEventTime` on `{bmc}-alerts` does NOT update for the test event
+- [x] 9.4 Integration smoke test: with a MetricReport-mode BMC in QA or local tilt cluster, verify `redfish_event_alert_total` increments and `redfish_server_critical_alert` reflects the Server condition after a test event round-trip and a real alert (or simulated alert via `SubmitTestEvent` with Critical severity); verify `LastEventTime` on `{bmc}-alerts` does NOT update for the test event
 
 ## Workflow follow-up
 

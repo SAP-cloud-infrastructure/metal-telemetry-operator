@@ -569,7 +569,17 @@ func (c *redfishClient) DeleteEventSubscription(ctx context.Context, uri string)
 }
 
 func (c *redfishClient) SubmitTestEvent(ctx context.Context, messageId string) error {
-	payload := map[string]string{"MessageId": messageId}
+	// HPE iLO 7 requires all fields; other vendors accept a minimal payload.
+	// OriginOfCondition must be a plain string on HPE (not a {"@odata.id":"..."} link).
+	payload := map[string]interface{}{
+		"MessageId":         messageId,
+		"EventId":           "1",
+		"EventTimestamp":    time.Now().UTC().Format(time.RFC3339),
+		"Message":           "Redfish pipeline health check",
+		"MessageArgs":       []string{},
+		"Severity":          "OK",
+		"OriginOfCondition": "/redfish/v1/Managers/1",
+	}
 	rawBody, err := json.Marshal(payload)
 	if err != nil {
 		return err

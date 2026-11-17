@@ -82,6 +82,18 @@ func (f *mockConsumeIfTest) ConsumeIfTest(_ string, messageID string) bool {
 	return false
 }
 
+// mockTestResultRecorder records RecordTestResult calls.
+type mockTestResultRecorder struct {
+	mu      sync.Mutex
+	results []string
+}
+
+func (r *mockTestResultRecorder) RecordTestResult(_ string, result string) {
+	r.mu.Lock()
+	r.results = append(r.results, result)
+	r.mu.Unlock()
+}
+
 func TestConn_AlertEventRouting(t *testing.T) {
 	host, shutdown := alertSSEServer(t)
 	defer shutdown()
@@ -89,7 +101,7 @@ func TestConn_AlertEventRouting(t *testing.T) {
 	es := newMockEventSink()
 	tf := &mockConsumeIfTest{}
 
-	mgr := sse.NewConnectionManager(10, nil, nil, es, tf, logr.Discard())
+	mgr := sse.NewConnectionManager(10, nil, nil, es, tf, nil, logr.Discard())
 
 	cfg := sse.ConnConfig{
 		BMCName:    "bmc-alerttest",
@@ -147,7 +159,7 @@ func TestConn_AlertEventRouting_NilTestFilter(t *testing.T) {
 	es := newMockEventSink()
 
 	// No test filter — all events including Base.1.0.TestMessage reach the sink.
-	mgr := sse.NewConnectionManager(10, nil, nil, es, nil, logr.Discard())
+	mgr := sse.NewConnectionManager(10, nil, nil, es, nil, nil, logr.Discard())
 
 	cfg := sse.ConnConfig{
 		BMCName:    "bmc-notestfilter",
@@ -178,4 +190,52 @@ func TestConn_AlertEventRouting_NilTestFilter(t *testing.T) {
 	}
 
 	mgr.StopBMC("bmc-notestfilter")
+}
+
+func TestConn_AlertEventRouting_RecordTestResult(t *testing.T) {
+	host, shutdown := alertSSEServer(t)
+	defer shutdown()
+
+	es := newMockEventSink()
+	tf := &mockConsumeIfTest{}
+	tr := &mockTestResultRecorder{}
+
+	mgr := sse.NewConnectionManager(10, nil, nil, es, tf, tr, logr.Discard())
+
+	cfg := sse.ConnConfig{
+		BMCName:    "bmc-testrecorder",
+		Host:       host,
+		Username:   testUsername,
+		Password:   testPassword,
+		Vendor:     sse.VendorConfig{Mode: sse.ModeSSE, SSEURI: testStandardSSEURI},
+		StreamKind: telemetryv1alpha1.StreamKindAlerts,
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if err := mgr.Ensure(ctx, cfg); err != nil {
+		t.Fatalf("Ensure: %v", err)
+	}
+
+	// Wait for the real event to arrive.
+	select {
+	case <-es.ch:
+	case <-ctx.Done():
+		t.Fatal("timed out waiting for real event")
+	}
+
+	// Give the SSE goroutine time to also process the test event.
+	time.Sleep(200 * time.Millisecond)
+
+	tr.mu.Lock()
+	results := make([]string, len(tr.results))
+	copy(results, tr.results)
+	tr.mu.Unlock()
+
+	if len(results) != 1 || results[0] != "success" {
+		t.Errorf("expected RecordTestResult(\"success\") called once, got %v", results)
+	}
+
+	mgr.StopBMC("bmc-testrecorder")
 }

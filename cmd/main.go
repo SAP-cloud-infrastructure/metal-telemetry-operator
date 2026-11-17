@@ -166,6 +166,7 @@ func main() {
 	}
 
 	if pushEventsAddr != "" && pushReceiverURL != "" {
+		var sseTestFilter push.ConsumeIfTest
 		if err := push.AddTo(mgr, &push.Options{
 			ReceiverURL:      pushReceiverURL,
 			EventsAddr:       pushEventsAddr,
@@ -176,10 +177,13 @@ func main() {
 			Sink:             sharedSink,
 			EventSink:        bmcReconciler.AlertEventSink,
 			StatusWriter:     bmcReconciler,
+			TestRecorder:     bmcReconciler.TestSink(),
+			ConsumeIfTestOut: &sseTestFilter,
 		}); err != nil {
 			setupLog.Error(err, "Failed to set up push pipeline")
 			os.Exit(1)
 		}
+		bmcReconciler.SetSSETestFilter(sseTestFilter)
 	}
 	// +kubebuilder:scaffold:builder
 

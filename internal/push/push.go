@@ -51,6 +51,13 @@ type Options struct {
 	// AddTo wires it to the push receiver so LastEventTime is updated on activity.
 	// Typically set to the BMCReconciler from main.go.
 	StatusWriter StatusWriter
+	// TestRecorder receives pipeline health-check results from push round-trips.
+	// Wire this to the shared TestEventSink created by BMCReconciler.SetupWithManager.
+	TestRecorder TestResultRecorder
+	// ConsumeIfTestOut, when non-nil, is filled in by AddTo with the push
+	// reconciler's ConsumeIfTest implementation. Call BMCReconciler.SetSSETestFilter
+	// with this value after AddTo returns to wire the SSE path.
+	ConsumeIfTestOut *ConsumeIfTest
 	// Log is the logger; defaults to the controller-runtime logger.
 	Log logr.Logger
 }
@@ -113,10 +120,16 @@ func AddTo(mgr ctrl.Manager, opts *Options) error {
 		}
 	}
 	reconciler := NewSubscriptionReconciler(mgr.GetClient(), reconcilerCfg)
+	reconciler.TestRecorder = opts.TestRecorder
 
 	// The subscription reconciler tracks in-flight test events and implements
 	// ConsumeIfTest; wire it unconditionally so the receiver can filter them.
 	receiver.SetTestFilter(reconciler)
+
+	// Expose the reconciler as a ConsumeIfTest so the SSE path can filter test events.
+	if opts.ConsumeIfTestOut != nil {
+		*opts.ConsumeIfTestOut = reconciler
+	}
 
 	receiver.SetOnResourceRemoved(reconciler.EnqueueBMC)
 

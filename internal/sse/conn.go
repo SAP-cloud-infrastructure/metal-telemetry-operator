@@ -39,6 +39,9 @@ type ConnConfig struct {
 	// TestFilter identifies and consumes in-flight SubmitTestEvent heartbeats.
 	// If nil, all events are treated as real hardware events.
 	TestFilter ConsumeIfTest
+	// TestRecorder records pipeline health-check results when a test event
+	// completes a round-trip. If nil, results are silently discarded.
+	TestRecorder TestResultRecorder
 }
 
 // StatusWriter updates BMCTelemetry status from the SSE goroutine.
@@ -51,28 +54,30 @@ type StatusWriter interface {
 
 // sseConn manages one long-lived SSE connection to a BMC.
 type sseConn struct {
-	cfg        ConnConfig
-	sink       sink.MetricReportSink
-	sw         StatusWriter
-	eventSink  sink.EventSink
-	testFilter ConsumeIfTest
-	log        logr.Logger
-	cancel     context.CancelFunc
-	done       chan struct{}
+	cfg          ConnConfig
+	sink         sink.MetricReportSink
+	sw           StatusWriter
+	eventSink    sink.EventSink
+	testFilter   ConsumeIfTest
+	testRecorder TestResultRecorder
+	log          logr.Logger
+	cancel       context.CancelFunc
+	done         chan struct{}
 }
 
 // start launches the SSE goroutine. Call stop() to terminate it.
 func startConn(ctx context.Context, cfg ConnConfig, s sink.MetricReportSink, sw StatusWriter) *sseConn {
 	connCtx, cancel := context.WithCancel(ctx)
 	c := &sseConn{
-		cfg:        cfg,
-		sink:       s,
-		sw:         sw,
-		eventSink:  cfg.EventSink,
-		testFilter: cfg.TestFilter,
-		log:        logr.FromContextOrDiscard(ctx).WithValues("bmc", cfg.BMCName),
-		cancel:     cancel,
-		done:       make(chan struct{}),
+		cfg:          cfg,
+		sink:         s,
+		sw:           sw,
+		eventSink:    cfg.EventSink,
+		testFilter:   cfg.TestFilter,
+		testRecorder: cfg.TestRecorder,
+		log:          logr.FromContextOrDiscard(ctx).WithValues("bmc", cfg.BMCName),
+		cancel:       cancel,
+		done:         make(chan struct{}),
 	}
 	go c.run(connCtx)
 	return c
@@ -228,6 +233,9 @@ func (c *sseConn) handleAlertEvent(ctx context.Context, data string, lastEvent *
 	real := events[:0]
 	for _, e := range events {
 		if c.testFilter != nil && c.testFilter.ConsumeIfTest(c.cfg.BMCName, e.MessageID) {
+			if c.testRecorder != nil {
+				c.testRecorder.RecordTestResult(c.cfg.BMCName, "success")
+			}
 			continue
 		}
 		real = append(real, e)
