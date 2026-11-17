@@ -351,9 +351,9 @@ func (r *SubscriptionReconciler) fetchCredentials(ctx context.Context, bmc *meta
 // ---------------------------------------------------------------------------
 
 const (
-	defaultTestEventInterval  = 5 * time.Minute
-	defaultTestEventTimeout   = 30 * time.Second
-	defaultReconcileInterval  = 10 * time.Minute
+	defaultTestEventInterval = 5 * time.Minute
+	defaultTestEventTimeout  = 30 * time.Second
+	defaultReconcileInterval = 10 * time.Minute
 )
 
 // testEntry tracks an in-flight heartbeat test event for one BMC.

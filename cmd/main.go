@@ -170,19 +170,19 @@ func main() {
 		var sseTestFilter push.ConsumeIfTest
 		var sseFirer func(ctx context.Context, bmcName, host, username, password, vendor, model string) error
 		if err := push.AddTo(mgr, &push.Options{
-			ReceiverURL:      pushReceiverURL,
-			EventsAddr:       pushEventsAddr,
-			SubscriberID:     pushSubscriberID,
-			BmcConfigName:    bmcConfigName,
+			ReceiverURL:        pushReceiverURL,
+			EventsAddr:         pushEventsAddr,
+			SubscriberID:       pushSubscriberID,
+			BmcConfigName:      bmcConfigName,
 			BmcConfigNamespace: bmcConfigNamespace,
-			SharedSecretName: pushSharedSecretName,
-			Sink:             sharedSink,
-			EventSink:        bmcReconciler.AlertEventSink,
-			StatusWriter:     bmcReconciler,
-			TestRecorder:     bmcReconciler.TestSink(),
-			ConsumeIfTestOut: &sseTestFilter,
-			SSETestFirerOut:  &sseFirer,
-			ConfigLoader:     pushLoader,
+			SharedSecretName:   pushSharedSecretName,
+			Sink:               sharedSink,
+			EventSink:          bmcReconciler.AlertEventSink,
+			StatusWriter:       bmcReconciler,
+			TestRecorder:       bmcReconciler.TestSink(),
+			ConsumeIfTestOut:   &sseTestFilter,
+			SSETestFirerOut:    &sseFirer,
+			ConfigLoader:       pushLoader,
 		}); err != nil {
 			setupLog.Error(err, "Failed to set up push pipeline")
 			os.Exit(1)
