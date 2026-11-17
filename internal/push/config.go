@@ -9,6 +9,7 @@ package push
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync/atomic"
@@ -71,6 +72,22 @@ type Duration struct{ time.Duration }
 func (d *Duration) UnmarshalYAML(unmarshal func(any) error) error {
 	var s string
 	if err := unmarshal(&s); err != nil {
+		return err
+	}
+	dur, err := time.ParseDuration(s)
+	if err != nil {
+		return fmt.Errorf("invalid duration %q: %w", s, err)
+	}
+	d.Duration = dur
+	return nil
+}
+
+// UnmarshalJSON supports human-readable duration strings when sigs.k8s.io/yaml
+// is used (it converts YAML→JSON then calls encoding/json, so UnmarshalYAML is
+// never invoked).
+func (d *Duration) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err != nil {
 		return err
 	}
 	dur, err := time.ParseDuration(s)
