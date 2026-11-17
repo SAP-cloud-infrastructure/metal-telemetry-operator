@@ -467,7 +467,12 @@ func (r *SubscriptionReconciler) ConsumeIfTest(bmcName, messageId string) bool {
 		return false
 	}
 	if entry.params.MessageId != messageId {
-		return false
+		// When the vendor delivers a different MessageId than what was sent
+		// (e.g. Dell iDRAC9 sends "IDRAC.2.9.LOG006" for a "LOG006" request),
+		// ReceiveMessageId carries the expected incoming form.
+		if entry.params.ReceiveMessageId == "" || entry.params.ReceiveMessageId != messageId {
+			return false
+		}
 	}
 	r.testPending.Delete(bmcName)
 	result := "success"

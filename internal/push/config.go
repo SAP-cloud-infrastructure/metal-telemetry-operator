@@ -106,6 +106,12 @@ type TestEventOverrideRule struct {
 	Models []string `yaml:"models"`
 	// MessageId is the Redfish MessageId sent in SubmitTestEvent.
 	MessageId string `yaml:"messageId"`
+	// ReceiveMessageId is the MessageId expected back in the SSE stream or
+	// alert POST. When empty, MessageId is used for matching.
+	// Required for vendors like Dell iDRAC9 where the short registry form is
+	// accepted for sending (e.g. "LOG006") but arrives fully-qualified
+	// (e.g. "IDRAC.2.9.LOG006").
+	ReceiveMessageId string `yaml:"receiveMessageId,omitempty"`
 	// Severity is the Severity field sent in SubmitTestEvent. Defaults to "OK".
 	Severity string `yaml:"severity,omitempty"`
 	// OriginOfCondition is sent as a plain string. Defaults to "/redfish/v1/Managers/1".
@@ -115,6 +121,7 @@ type TestEventOverrideRule struct {
 // TestEventParams holds the per-vendor parameters for a SubmitTestEvent call.
 type TestEventParams struct {
 	MessageId         string
+	ReceiveMessageId  string // expected back; when empty, MessageId is used
 	Severity          string
 	OriginOfCondition string
 }
@@ -140,6 +147,7 @@ func (c *Config) TestParamsFor(vendor, model string) TestEventParams {
 			if m == "*" || m == model {
 				p := TestEventParams{
 					MessageId:         ov.MessageId,
+					ReceiveMessageId:  ov.ReceiveMessageId,
 					Severity:          ov.Severity,
 					OriginOfCondition: ov.OriginOfCondition,
 				}

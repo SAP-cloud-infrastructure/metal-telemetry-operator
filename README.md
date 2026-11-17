@@ -165,6 +165,7 @@ Each rule specifies the Redfish `SubmitTestEvent` body for a vendor+model combin
 | `vendor` | yes | Must match `bmc.status.manufacturer` (e.g. `HPE`, `Dell`, `Lenovo`, `BULL`) |
 | `models` | yes | List of `bmc.status.model` values to match; `["*"]` matches all models |
 | `messageId` | yes | Redfish `MessageId` to send in SubmitTestEvent |
+| `receiveMessageId` | no | `MessageId` expected back in the stream. Set when the vendor delivers a different form than what was sent (e.g. Dell iDRAC9 accepts `LOG006` but delivers `IDRAC.2.9.LOG006`). When empty, `messageId` is used for matching. |
 | `severity` | no | `Severity` field; defaults to `OK` |
 | `originOfCondition` | no | `OriginOfCondition` field; defaults to `/redfish/v1/Managers/1` |
 
@@ -214,18 +215,22 @@ data:
       - vendor: "Dell"
         models:
           - "16G Monolithic"
-        messageId: "FAN0001"
+        messageId: "LOG006"
+        receiveMessageId: "IDRAC.2.9.LOG006"
         severity: "Informational"
       - vendor: "Dell"
         models:
           - "17G Monolithic"
-        messageId: "FAN.1.0.FAN0001"
+        messageId: "Base.1.0.TestMessage"
         severity: "Informational"
       - vendor: "Lenovo"
         models:
           - "Lenovo XClarity Controller"
-          - "Lenovo XClarity Controller 3"
         messageId: "EventRegistry.1.0.0.FQXSPCA0012I"
+      - vendor: "Lenovo"
+        models:
+          - "Lenovo XClarity Controller 3"
+        messageId: "Base.1.0.TestMessage"
       - vendor: "BULL"
         models:
           - "OpenBmc"
