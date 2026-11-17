@@ -162,7 +162,7 @@ Each rule specifies the Redfish `SubmitTestEvent` body for a vendor+model combin
 
 | Field | Required | Description |
 |-------|----------|-------------|
-| `vendor` | yes | Must match `bmc.status.manufacturer` (e.g. `HPE`, `Dell Inc.`, `Lenovo`, `BULL`) |
+| `vendor` | yes | Must match `bmc.status.manufacturer` (e.g. `HPE`, `Dell`, `Lenovo`, `BULL`) |
 | `models` | yes | List of `bmc.status.model` values to match; `["*"]` matches all models |
 | `messageId` | yes | Redfish `MessageId` to send in SubmitTestEvent |
 | `severity` | no | `Severity` field; defaults to `OK` |
@@ -211,12 +211,12 @@ data:
         messageId: "iLOEvents.1.0.TestAlert"
         severity: "OK"
         originOfCondition: "/redfish/v1/Managers/1"
-      - vendor: "Dell Inc."
+      - vendor: "Dell"
         models:
           - "16G Monolithic"
         messageId: "FAN0001"
         severity: "Informational"
-      - vendor: "Dell Inc."
+      - vendor: "Dell"
         models:
           - "17G Monolithic"
         messageId: "FAN.1.0.FAN0001"
