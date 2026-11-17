@@ -3,7 +3,7 @@ module github.com/SAP-cloud-infrastructure/metal-telemetry-operator
 go 1.27.4
 
 require (
-	github.com/Masterminds/semver/v3 v3.4.0
+	github.com/Masterminds/semver/v3 v3.5.0
 	github.com/go-logr/logr v1.4.4
 	github.com/ironcore-dev/metal-operator v0.8.1-0.20261027090827-a4276fd5b842
 	github.com/onsi/ginkgo/v2 v2.33.1
