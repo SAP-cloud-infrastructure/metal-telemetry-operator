@@ -33,6 +33,7 @@ import (
 const (
 	testVendorHPE         = "HPE"
 	testAnnotationExclude = "true"
+	testBMCMetrics        = "test-bmc-metrics"
 )
 
 type nopSink struct{}
@@ -410,7 +411,7 @@ func TestNormaliseProbeError(t *testing.T) {
 
 func TestSetSchemaDetectedCondition_idempotent(t *testing.T) {
 	tel := &telemetryv1alpha1.BMCTelemetry{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-bmc-metrics"},
+		ObjectMeta: metav1.ObjectMeta{Name: testBMCMetrics},
 	}
 	r := newDispatchReconciler(t, tel)
 	ctx := context.Background()
@@ -420,7 +421,7 @@ func TestSetSchemaDetectedCondition_idempotent(t *testing.T) {
 		t.Fatalf("first setSchemaDetectedCondition: %v", err)
 	}
 	got := &telemetryv1alpha1.BMCTelemetry{}
-	if err := r.Get(ctx, types.NamespacedName{Name: "test-bmc-metrics"}, got); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Name: testBMCMetrics}, got); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	rv1 := got.ResourceVersion
@@ -437,7 +438,7 @@ func TestSetSchemaDetectedCondition_idempotent(t *testing.T) {
 		t.Fatalf("second setSchemaDetectedCondition: %v", err)
 	}
 	got2 := &telemetryv1alpha1.BMCTelemetry{}
-	if err := r.Get(ctx, types.NamespacedName{Name: "test-bmc-metrics"}, got2); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Name: testBMCMetrics}, got2); err != nil {
 		t.Fatalf("Get after second call: %v", err)
 	}
 	if got2.ResourceVersion != rv1 {
@@ -450,7 +451,7 @@ func TestSetSchemaDetectedCondition_idempotent(t *testing.T) {
 		t.Fatalf("third setSchemaDetectedCondition: %v", err)
 	}
 	got3 := &telemetryv1alpha1.BMCTelemetry{}
-	if err := r.Get(ctx, types.NamespacedName{Name: "test-bmc-metrics"}, got3); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Name: testBMCMetrics}, got3); err != nil {
 		t.Fatalf("Get after third call: %v", err)
 	}
 	if got3.ResourceVersion == rv1 {
@@ -493,7 +494,7 @@ func TestProbeBackoff(t *testing.T) {
 
 func TestProbeFailureClearsConnectedCondition(t *testing.T) {
 	tel := &telemetryv1alpha1.BMCTelemetry{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-bmc-metrics"},
+		ObjectMeta: metav1.ObjectMeta{Name: testBMCMetrics},
 		Status: telemetryv1alpha1.BMCTelemetryStatus{
 			ConnectionState: telemetryv1alpha1.ConnectionStateConnected,
 			Conditions: []metav1.Condition{
@@ -510,11 +511,11 @@ func TestProbeFailureClearsConnectedCondition(t *testing.T) {
 	ctx := context.Background()
 
 	// First call: Connected=True → should patch to False/ProbeFailed + ProbeBackoff.
-	if err := r.setConnectedCondition(ctx, tel, false, "ProbeFailed"); err != nil {
+	if err := r.setConnectedCondition(ctx, tel); err != nil {
 		t.Fatalf("first setConnectedCondition: %v", err)
 	}
 	got := &telemetryv1alpha1.BMCTelemetry{}
-	if err := r.Get(ctx, types.NamespacedName{Name: "test-bmc-metrics"}, got); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Name: testBMCMetrics}, got); err != nil {
 		t.Fatalf("Get: %v", err)
 	}
 	rv1 := got.ResourceVersion
@@ -530,11 +531,11 @@ func TestProbeFailureClearsConnectedCondition(t *testing.T) {
 	*tel = *got
 
 	// Second call with same state → must be a no-op.
-	if err := r.setConnectedCondition(ctx, tel, false, "ProbeFailed"); err != nil {
+	if err := r.setConnectedCondition(ctx, tel); err != nil {
 		t.Fatalf("second setConnectedCondition: %v", err)
 	}
 	got2 := &telemetryv1alpha1.BMCTelemetry{}
-	if err := r.Get(ctx, types.NamespacedName{Name: "test-bmc-metrics"}, got2); err != nil {
+	if err := r.Get(ctx, types.NamespacedName{Name: testBMCMetrics}, got2); err != nil {
 		t.Fatalf("Get after second call: %v", err)
 	}
 	if got2.ResourceVersion != rv1 {

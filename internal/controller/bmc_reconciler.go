@@ -44,6 +44,8 @@ import (
 	"github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/sse"
 )
 
+const reasonProbeFailed = "ProbeFailed"
+
 // BMCReconciler reconciles metal-operator BMC resources and manages SSE telemetry connections.
 type BMCReconciler struct {
 	client.Client
@@ -320,10 +322,10 @@ func (r *BMCReconciler) probeEventServiceForBMC(
 		if err2 := r.setSchemaDetectedCondition(ctx, alertsTel, false, msg); err2 != nil {
 			log.Error(err2, "Failed to update SchemaDetected condition")
 		}
-		if err2 := r.setConnectedCondition(ctx, metricsTel, false, "ProbeFailed"); err2 != nil {
+		if err2 := r.setConnectedCondition(ctx, metricsTel); err2 != nil {
 			log.Error(err2, "Failed to update Connected condition")
 		}
-		if err2 := r.setConnectedCondition(ctx, alertsTel, false, "ProbeFailed"); err2 != nil {
+		if err2 := r.setConnectedCondition(ctx, alertsTel); err2 != nil {
 			log.Error(err2, "Failed to update Connected condition")
 		}
 		return "", "", "", sse.VendorConfig{}, requeue
@@ -474,7 +476,7 @@ func (r *BMCReconciler) setSchemaDetectedCondition(ctx context.Context, tel *tel
 	reason := "Probed"
 	if !ok {
 		status = metav1.ConditionFalse
-		reason = "ProbeFailed"
+		reason = reasonProbeFailed
 	}
 	existing := meta.FindStatusCondition(tel.Status.Conditions, telemetryv1alpha1.ConditionSchemaDetected)
 	if existing != nil && existing.Status == status && existing.Reason == reason {
@@ -491,31 +493,22 @@ func (r *BMCReconciler) setSchemaDetectedCondition(ctx context.Context, tel *tel
 	return r.Status().Patch(ctx, tel, patch)
 }
 
-// setConnectedCondition updates the Connected condition and (on failure) the ConnectionState
-// on the BMCTelemetry. It is a no-op when the condition and ConnectionState are already correct.
-func (r *BMCReconciler) setConnectedCondition(ctx context.Context, tel *telemetryv1alpha1.BMCTelemetry, connected bool, reason string) error {
-	condStatus := metav1.ConditionFalse
-	if connected {
-		condStatus = metav1.ConditionTrue
-	}
+// setConnectedCondition sets the Connected condition to False/ProbeFailed and sets
+// connectionState=ProbeBackoff. It is a no-op when both are already correct.
+func (r *BMCReconciler) setConnectedCondition(ctx context.Context, tel *telemetryv1alpha1.BMCTelemetry) error {
 	existing := meta.FindStatusCondition(tel.Status.Conditions, telemetryv1alpha1.ConditionConnected)
-	alreadySet := existing != nil && existing.Status == condStatus && existing.Reason == reason
-	if !connected {
-		alreadySet = alreadySet && tel.Status.ConnectionState == telemetryv1alpha1.ConnectionStateProbeBackoff
-	}
-	if alreadySet {
+	if existing != nil && existing.Status == metav1.ConditionFalse && existing.Reason == reasonProbeFailed &&
+		tel.Status.ConnectionState == telemetryv1alpha1.ConnectionStateProbeBackoff {
 		return nil
 	}
 	patch := client.MergeFrom(tel.DeepCopy())
 	meta.SetStatusCondition(&tel.Status.Conditions, metav1.Condition{
 		Type:               telemetryv1alpha1.ConditionConnected,
-		Status:             condStatus,
-		Reason:             reason,
+		Status:             metav1.ConditionFalse,
+		Reason:             reasonProbeFailed,
 		LastTransitionTime: metav1.Now(),
 	})
-	if !connected {
-		tel.Status.ConnectionState = telemetryv1alpha1.ConnectionStateProbeBackoff
-	}
+	tel.Status.ConnectionState = telemetryv1alpha1.ConnectionStateProbeBackoff
 	return r.Status().Patch(ctx, tel, patch)
 }
 
@@ -532,11 +525,7 @@ func normaliseProbeError(err error) string {
 }
 
 func formatProbeMessage(msg string, requeue time.Duration) string {
-	mins := int(requeue.Minutes())
-	if mins < 1 {
-		mins = 1
-	}
-	return fmt.Sprintf("%s (next retry in ~%dm)", msg, mins)
+	return fmt.Sprintf("%s (next retry in ~%dm)", msg, max(int(requeue.Minutes()), 1))
 }
 
 func probeBackoff(failures int) time.Duration {
