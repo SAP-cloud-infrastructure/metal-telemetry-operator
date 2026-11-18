@@ -180,6 +180,7 @@ func main() {
 			EventSink:          bmcReconciler.AlertEventSink,
 			StatusWriter:       bmcReconciler,
 			TestRecorder:       bmcReconciler.TestSink(),
+			StatusRecorder:     bmcReconciler.StatusSink(),
 			ConsumeIfTestOut:   &sseTestFilter,
 			SSETestFirerOut:    &sseFirer,
 			ConfigLoader:       pushLoader,

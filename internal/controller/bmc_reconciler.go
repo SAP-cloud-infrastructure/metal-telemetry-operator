@@ -77,6 +77,9 @@ type BMCReconciler struct {
 	// testSink records pipeline health-check results. Exposed so main.go can pass
 	// it to push.AddTo; Forget is called in deletion paths.
 	testSink *prometheusSink.TestEventSink
+	// statusSink records per-BMC push-subscription health as a Prometheus gauge.
+	// Exposed via StatusSink() so main.go can pass it to push.AddTo.
+	statusSink *prometheusSink.SubscriptionStatusSink
 
 	// probeFailures tracks consecutive EventService probe failures per BMC (key: BMC name, value: int).
 	probeFailures sync.Map
@@ -144,6 +147,13 @@ func (r *BMCReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}
 		r.testSink = ts
 
+		ss, ssErr := prometheusSink.NewSubscriptionStatusSink(ctrlmetrics.Registry)
+		if ssErr != nil {
+			initErr = fmt.Errorf("create subscription status sink: %w", ssErr)
+			return
+		}
+		r.statusSink = ss
+
 		r.connMgr = sse.NewConnectionManager(
 			int64(r.MaxConcurrentConnects),
 			s,
@@ -208,6 +218,10 @@ func (r *BMCReconciler) TestSink() *prometheusSink.TestEventSink {
 	return r.testSink
 }
 
+func (r *BMCReconciler) StatusSink() *prometheusSink.SubscriptionStatusSink {
+	return r.statusSink
+}
+
 // Reconcile drives the telemetry state for one BMC.
 func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := ctrl.LoggerFrom(ctx)
@@ -215,9 +229,7 @@ func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	bmc := &metalv1alpha1.BMC{}
 	if err := r.Get(ctx, req.NamespacedName, bmc); err != nil {
 		if apierrors.IsNotFound(err) {
-			r.connMgr.StopBMC(req.Name)
-			r.sinkInst.Forget(req.Name)
-			r.testSink.Forget(req.Name)
+			r.forgetBMC(req.Name)
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -225,9 +237,7 @@ func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 	// If the BMC is being deleted or not yet enabled, shut down any connection.
 	if !bmc.DeletionTimestamp.IsZero() || bmc.Status.State != metalv1alpha1.BMCStateEnabled {
-		r.connMgr.StopBMC(bmc.Name)
-		r.sinkInst.Forget(bmc.Name)
-		r.testSink.Forget(bmc.Name)
+		r.forgetBMC(bmc.Name)
 		if err := r.deleteOwnedTelemetry(ctx, bmc.Name); err != nil {
 			return ctrl.Result{}, err
 		}
@@ -245,25 +255,16 @@ func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	earlyMode := r.resolveEarlyMode(bmc, metricsTel, cfg)
 
 	// Short-circuit for modes that don't require an SSE connection.
-	if earlyMode == telemetryv1alpha1.TelemetryModeExcluded ||
-		earlyMode == telemetryv1alpha1.TelemetryModeMetricReport ||
-		earlyMode == telemetryv1alpha1.TelemetryModeUnsupported {
-		r.connMgr.StopBMC(bmc.Name)
-		if err := r.updateTelemetryStatus(ctx, metricsTel, earlyMode, sse.VendorConfig{}, ""); err != nil {
-			return ctrl.Result{}, err
-		}
-		if err := r.updateTelemetryStatus(ctx, alertsTel, earlyMode, sse.VendorConfig{}, ""); err != nil {
-			return ctrl.Result{}, err
-		}
-		if earlyMode != telemetryv1alpha1.TelemetryModeUnsupported && r.EnqueuePushBMC != nil {
-			r.EnqueuePushBMC(bmc.Name)
-		}
-		return ctrl.Result{}, nil
+	if isNonSSEMode(earlyMode) {
+		return ctrl.Result{}, r.stopAndApplyNonSSEMode(ctx, bmc, metricsTel, alertsTel, earlyMode, sse.VendorConfig{})
 	}
 
 	// Step 4: probe the EventService (required to discover SSE URI and detect MetricReport mode).
 	host, username, password, vendorCfg, requeue := r.probeEventServiceForBMC(ctx, bmc, metricsTel, alertsTel)
 	if requeue > 0 {
+		if r.statusSink != nil {
+			r.statusSink.RecordSubscriptionStatus(bmc.Name, bmc.Status.Manufacturer, bmc.Status.Model, "probe_failed")
+		}
 		return ctrl.Result{RequeueAfter: requeue}, nil
 	}
 
@@ -273,20 +274,8 @@ func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 		mode = probeModeToTelemetryMode(vendorCfg.Mode)
 	}
 
-	if mode == telemetryv1alpha1.TelemetryModeUnsupported ||
-		mode == telemetryv1alpha1.TelemetryModeExcluded ||
-		mode == telemetryv1alpha1.TelemetryModeMetricReport {
-		r.connMgr.StopBMC(bmc.Name)
-		if err := r.updateTelemetryStatus(ctx, metricsTel, mode, vendorCfg, ""); err != nil {
-			return ctrl.Result{}, err
-		}
-		if err := r.updateTelemetryStatus(ctx, alertsTel, mode, vendorCfg, ""); err != nil {
-			return ctrl.Result{}, err
-		}
-		if mode != telemetryv1alpha1.TelemetryModeUnsupported && r.EnqueuePushBMC != nil {
-			r.EnqueuePushBMC(bmc.Name)
-		}
-		return ctrl.Result{}, nil
+	if isNonSSEMode(mode) {
+		return ctrl.Result{}, r.stopAndApplyNonSSEMode(ctx, bmc, metricsTel, alertsTel, mode, vendorCfg)
 	}
 
 	// Start or update the SSE connections — one for metrics (MetricReport filter), one for alerts (Event filter).
@@ -317,6 +306,9 @@ func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	if err := r.updateTelemetryStatus(ctx, alertsTel, telemetryv1alpha1.TelemetryModeSSE, vendorCfg, alertsTel.Status.ConnectionState); err != nil {
 		return ctrl.Result{}, err
 	}
+	if r.statusSink != nil {
+		r.statusSink.RecordSubscriptionStatus(bmc.Name, bmc.Status.Manufacturer, bmc.Status.Model, "sse_mode")
+	}
 
 	if r.sseTestFirer != nil {
 		if fireErr := r.sseTestFirer(ctx, bmc.Name, host, username, password, bmc.Status.Manufacturer, bmc.Status.Model); fireErr != nil {
@@ -325,6 +317,48 @@ func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 
 	return ctrl.Result{RequeueAfter: r.effectiveSSERequeueInterval()}, nil
+}
+
+// forgetBMC cleans up all in-memory state for a BMC that has been deleted or disabled.
+func (r *BMCReconciler) forgetBMC(name string) {
+	r.connMgr.StopBMC(name)
+	r.sinkInst.Forget(name)
+	r.testSink.Forget(name)
+	if r.statusSink != nil {
+		r.statusSink.ForgetSubscriptionStatus(name)
+	}
+}
+
+// isNonSSEMode reports whether the mode resolves without an SSE connection.
+func isNonSSEMode(mode telemetryv1alpha1.TelemetryMode) bool {
+	return mode == telemetryv1alpha1.TelemetryModeExcluded ||
+		mode == telemetryv1alpha1.TelemetryModeMetricReport ||
+		mode == telemetryv1alpha1.TelemetryModeUnsupported
+}
+
+// stopAndApplyNonSSEMode stops the BMC connection and updates both telemetry statuses
+// for any mode that does not use SSE (Excluded, MetricReport, Unsupported).
+func (r *BMCReconciler) stopAndApplyNonSSEMode(
+	ctx context.Context,
+	bmc *metalv1alpha1.BMC,
+	metricsTel, alertsTel *telemetryv1alpha1.BMCTelemetry,
+	mode telemetryv1alpha1.TelemetryMode,
+	vc sse.VendorConfig,
+) error {
+	r.connMgr.StopBMC(bmc.Name)
+	if err := r.updateTelemetryStatus(ctx, metricsTel, mode, vc, ""); err != nil {
+		return err
+	}
+	if err := r.updateTelemetryStatus(ctx, alertsTel, mode, vc, ""); err != nil {
+		return err
+	}
+	if mode == telemetryv1alpha1.TelemetryModeExcluded && r.statusSink != nil {
+		r.statusSink.RecordSubscriptionStatus(bmc.Name, bmc.Status.Manufacturer, bmc.Status.Model, "excluded")
+	}
+	if mode != telemetryv1alpha1.TelemetryModeUnsupported && r.EnqueuePushBMC != nil {
+		r.EnqueuePushBMC(bmc.Name)
+	}
+	return nil
 }
 
 // probeEventServiceForBMC fetches credentials, validates the BMC IP, probes the Redfish

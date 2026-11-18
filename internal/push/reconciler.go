@@ -62,6 +62,13 @@ type TestResultRecorder interface {
 	RecordTestResult(bmcName, result string)
 }
 
+// SubscriptionStatusRecorder records per-BMC push-subscription health.
+// Implemented by the Prometheus subscription status sink; may be nil to disable recording.
+type SubscriptionStatusRecorder interface {
+	RecordSubscriptionStatus(bmcName, vendor, model, reason string)
+	ForgetSubscriptionStatus(bmcName string)
+}
+
 // ReconcilerConfig holds all parameters for constructing a SubscriptionReconciler.
 type ReconcilerConfig struct {
 	// ReceiverURL is the base URL the BMCs POST MetricReports to.
@@ -101,6 +108,8 @@ type SubscriptionReconciler struct {
 	lastTestTime sync.Map // bmcName → time.Time
 	// TestRecorder receives pipeline health-check results. May be nil.
 	TestRecorder TestResultRecorder
+	// StatusRecorder receives per-BMC push-subscription health updates. May be nil.
+	StatusRecorder SubscriptionStatusRecorder
 }
 
 // NewSubscriptionReconciler constructs a SubscriptionReconciler ready for
@@ -242,6 +251,9 @@ func (r *SubscriptionReconciler) ensureSubscriptions(ctx context.Context, bmc *m
 		if err != nil {
 			if errors.Is(err, ErrSubscriptionSlotsFull) {
 				r.setConnState(ctx, bmc.Name+"-metrics", telemetryv1alpha1.ConnectionStateSlotsFull)
+				if r.StatusRecorder != nil {
+					r.StatusRecorder.RecordSubscriptionStatus(bmc.Name, bmc.Status.Manufacturer, bmc.Status.Model, "slots_full")
+				}
 			}
 			return fmt.Errorf("create MetricReport subscription: %w", err)
 		}
@@ -255,12 +267,18 @@ func (r *SubscriptionReconciler) ensureSubscriptions(ctx context.Context, bmc *m
 		if err != nil {
 			if errors.Is(err, ErrSubscriptionSlotsFull) {
 				r.setConnState(ctx, bmc.Name+"-alerts", telemetryv1alpha1.ConnectionStateSlotsFull)
+				if r.StatusRecorder != nil {
+					r.StatusRecorder.RecordSubscriptionStatus(bmc.Name, bmc.Status.Manufacturer, bmc.Status.Model, "slots_full")
+				}
 			}
 			return fmt.Errorf("create alerts subscription: %w", err)
 		}
 		log.Info("Created alerts push subscription", "uri", uri)
 	}
 	r.setConnState(ctx, bmc.Name+"-alerts", telemetryv1alpha1.ConnectionStateSubscriptionActive)
+	if r.StatusRecorder != nil {
+		r.StatusRecorder.RecordSubscriptionStatus(bmc.Name, bmc.Status.Manufacturer, bmc.Status.Model, "subscribed")
+	}
 	r.maybeRunTestEvent(ctx, rc, bmc.Name, bmc.Status.Manufacturer, bmc.Status.Model)
 	return nil
 }

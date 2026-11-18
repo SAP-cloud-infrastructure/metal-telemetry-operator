@@ -54,6 +54,9 @@ type Options struct {
 	// TestRecorder receives pipeline health-check results from push round-trips.
 	// Wire this to the shared TestEventSink created by BMCReconciler.SetupWithManager.
 	TestRecorder TestResultRecorder
+	// StatusRecorder receives per-BMC push-subscription health updates.
+	// Wire this to the shared SubscriptionStatusSink created by BMCReconciler.SetupWithManager.
+	StatusRecorder SubscriptionStatusRecorder
 	// ConsumeIfTestOut, when non-nil, is filled in by AddTo with the push
 	// reconciler's ConsumeIfTest implementation. Call BMCReconciler.SetSSETestFilter
 	// with this value after AddTo returns to wire the SSE path.
@@ -132,6 +135,7 @@ func AddTo(mgr ctrl.Manager, opts *Options) error {
 	}
 	reconciler := NewSubscriptionReconciler(mgr.GetClient(), reconcilerCfg)
 	reconciler.TestRecorder = opts.TestRecorder
+	reconciler.StatusRecorder = opts.StatusRecorder
 
 	// The subscription reconciler tracks in-flight test events and implements
 	// ConsumeIfTest; wire it unconditionally so the receiver can filter them.

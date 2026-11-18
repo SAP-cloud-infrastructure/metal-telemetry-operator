@@ -1,0 +1,12 @@
+groups:
+  - name: redfish_critical_alerts
+    rules:
+    - alert: RedfishCriticalAlertActive
+      expr: |
+        redfish_server_critical_alert > 0
+      for: 5m
+      labels:
+        hostname: "{{ $labels.hostname }}"
+      annotations:
+        summary: >
+          BMC {{ $labels.hostname }} has had an active critical condition for more than 5 minutes

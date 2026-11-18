@@ -1,0 +1,25 @@
+groups:
+  - name: redfish_hardware_alerts
+    rules:
+    - alert: RedfishCriticalHardwareEvent
+      expr: |
+        increase(redfish_event_alert_total{severity="Critical"}[5m]) > 0
+      for: 1m
+      labels:
+        hostname: "{{ $labels.hostname }}"
+        severity: "{{ $labels.severity }}"
+        message_id: "{{ $labels.message_id }}"
+      annotations:
+        summary: >
+          BMC {{ $labels.hostname }} received a Critical Redfish hardware event [{{ $labels.message_id }}]
+    - alert: RedfishWarningHardwareEvent
+      expr: |
+        increase(redfish_event_alert_total{severity="Warning"}[5m]) > 0
+      for: 5m
+      labels:
+        hostname: "{{ $labels.hostname }}"
+        severity: "{{ $labels.severity }}"
+        message_id: "{{ $labels.message_id }}"
+      annotations:
+        summary: >
+          BMC {{ $labels.hostname }} received a Warning Redfish hardware event [{{ $labels.message_id }}]

@@ -42,6 +42,19 @@ drops these silently at `metricsink.go:86-88`. Fixing requires a future
 ³ Available via Redfish polling only for HPE and Lenovo; Dell pushes these via
 TelemetryService.
 
+## Alerting Rules
+
+PrometheusRule CRs for hardware event alerting and subscription monitoring. Each rule has a dedicated enable flag in `values.yaml` under `prometheusRules.alerts.<key>`.
+
+| Alert | File | `values.yaml` key | Description |
+|---|---|---|---|
+| `RedfishCriticalHardwareEvent` | `alert-redfishHardwareEvent.rules` | `redfishHardwareEvent` | New Critical severity events; fires after 1 minute |
+| `RedfishWarningHardwareEvent` | `alert-redfishHardwareEvent.rules` | `redfishHardwareEvent` | New Warning severity events; fires after 5 minutes |
+| `RedfishCriticalAlertActive` | `alert-redfishCriticalAlertActive.rules` | `redfishCriticalAlertActive` | Sustained critical condition (`redfish_server_critical_alert > 0` for 5 minutes) |
+| `RedfishUnmappedMetricId` | `alert-redfishUnmappedMetricId.rules` | `redfishUnmappedMetricId` | Metric IDs with no canonical mapping in `redfish-canonical.rules` |
+
+`RedfishCriticalHardwareEvent` and `RedfishWarningHardwareEvent` replace the former undifferentiated `RedfishHardwareAlert` rule (removed in this chart version). If you previously silenced or routed `RedfishHardwareAlert` in Alertmanager, update your matchers to use the new severity-scoped alert names.
+
 ## Adding Custom Rules
 
 To deploy additional rules without modifying the chart, use the top-level

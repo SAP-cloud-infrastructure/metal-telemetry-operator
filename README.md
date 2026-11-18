@@ -134,6 +134,45 @@ absent(redfish_event_pipeline_test_timestamp)
 
 ---
 
+### `redfish_bmc_event_subscription_status` — Gauge
+
+Push-subscription health per BMC. Value is `1` when the BMC has an active push subscription; `0` otherwise. Emitted for every BMC the operator manages — including those using SSE, excluded by config, or failing the vendor probe — so absence of this metric indicates an untracked BMC rather than a healthy one.
+
+| Label | Description |
+|-------|-------------|
+| `hostname` | BMC resource name in Kubernetes |
+| `vendor` | BMC manufacturer (`bmc.status.manufacturer`) |
+| `model` | BMC model (`bmc.status.model`) |
+| `reason` | Subscription state: `subscribed`, `slots_full`, `sse_mode`, `excluded`, or `probe_failed` |
+
+**Reason values:**
+
+| Reason | Value | Description |
+|--------|-------|-------------|
+| `subscribed` | 1 | Both MetricReport and alerts EventDestination subscriptions are active |
+| `slots_full` | 0 | BMC rejected subscription creation with HTTP 409 (no available slots) |
+| `sse_mode` | 0 | BMC uses SSE delivery; push subscriptions are not created |
+| `excluded` | 0 | BMC matched an `excludeHardware` config rule |
+| `probe_failed` | 0 | Vendor probe returned an error or reached its retry cap |
+
+**Example queries:**
+
+```promql
+# BMCs with no active push subscription
+redfish_bmc_event_subscription_status == 0
+
+# Subscription health breakdown by reason
+count by (reason) (redfish_bmc_event_subscription_status)
+
+# BMCs that failed to subscribe due to slot exhaustion
+redfish_bmc_event_subscription_status{reason="slots_full"}
+
+# Push subscription rate across the fleet
+sum(redfish_bmc_event_subscription_status{reason="subscribed"}) / count(redfish_bmc_event_subscription_status)
+```
+
+---
+
 ### Standard controller-runtime metrics
 
 The operator also exposes the standard `controller_runtime_*` and `workqueue_*` metrics provided by the controller-runtime framework, including reconcile counts, error rates, and queue depth per controller.
