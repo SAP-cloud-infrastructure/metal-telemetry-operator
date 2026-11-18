@@ -28,6 +28,7 @@ type ConnectionManager struct {
 	sem          *semaphore.Weighted
 	sink         sink.MetricReportSink
 	sw           StatusWriter
+	recorder     StreamConnectionRecorder
 	eventSink    sink.EventSink
 	testFilter   ConsumeIfTest
 	testRecorder TestResultRecorder
@@ -38,11 +39,12 @@ type ConnectionManager struct {
 
 // NewConnectionManager creates a ConnectionManager that allows at most
 // maxConcurrent simultaneous active SSE connections.
-func NewConnectionManager(maxConcurrent int64, s sink.MetricReportSink, sw StatusWriter, es sink.EventSink, tf ConsumeIfTest, tr TestResultRecorder, log logr.Logger) *ConnectionManager {
+func NewConnectionManager(maxConcurrent int64, s sink.MetricReportSink, sw StatusWriter, recorder StreamConnectionRecorder, es sink.EventSink, tf ConsumeIfTest, tr TestResultRecorder, log logr.Logger) *ConnectionManager {
 	return &ConnectionManager{
 		sem:          semaphore.NewWeighted(maxConcurrent),
 		sink:         s,
 		sw:           sw,
+		recorder:     recorder,
 		eventSink:    es,
 		testFilter:   tf,
 		testRecorder: tr,
@@ -98,7 +100,7 @@ func (m *ConnectionManager) Ensure(ctx context.Context, cfg ConnConfig) error {
 	cfg.EventSink = m.eventSink
 	cfg.TestFilter = m.testFilter
 	cfg.TestRecorder = m.testRecorder
-	conn := startConn(logr.NewContext(ctx, m.log), cfg, m.sink, m.sw)
+	conn := startConn(logr.NewContext(ctx, m.log), cfg, m.sink, m.sw, m.recorder)
 	// The semaphore slot is released when the connection goroutine exits.
 	go func() {
 		<-conn.done

@@ -9,76 +9,77 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-const subscriptionStatusName = "bmc_event_subscription_status"
+const streamConnectionStatusName = "stream_connection_status"
 
-// SubscriptionStatusRecorder records per-BMC push-subscription health.
-// Implemented by SubscriptionStatusSink; may be nil to disable metric recording.
-type SubscriptionStatusRecorder interface {
-	RecordSubscriptionStatus(bmcName, vendor, model, reason string)
-	ForgetSubscriptionStatus(bmcName string)
+// streamKey uniquely identifies one Prometheus series by BMC name and stream type.
+type streamKey struct {
+	bmcName    string
+	streamType string // "metrics" or "alerts"
 }
 
-// SubscriptionStatusSink records the push-subscription status of each BMC as
-// the redfish_bmc_event_subscription_status gauge.
+// StreamConnectionSink records per-stream connection status for each BMC as
+// the redfish_stream_connection_status gauge.
 //
-// Label set: {hostname, vendor, model, reason}.
-// Value is 1 when the BMC has an active push subscription, 0 otherwise.
-type SubscriptionStatusSink struct {
+// Label set: {hostname, stream_type, reason}.
+// Value is 1 when the stream is live (reason=="connected"), 0 otherwise.
+// Exactly two series per BMC: one for stream_type="metrics", one for stream_type="alerts".
+type StreamConnectionSink struct {
 	gauge *prometheus.GaugeVec
 
 	mu      sync.Mutex
-	tracked map[string]prometheus.Labels // bmcName → current label set
+	tracked map[streamKey]prometheus.Labels
 }
 
-var _ SubscriptionStatusRecorder = (*SubscriptionStatusSink)(nil)
-
-func NewSubscriptionStatusSink(reg prometheus.Registerer) (*SubscriptionStatusSink, error) {
-	s := &SubscriptionStatusSink{
-		tracked: make(map[string]prometheus.Labels),
+func NewStreamConnectionSink(reg prometheus.Registerer) (*StreamConnectionSink, error) {
+	s := &StreamConnectionSink{
+		tracked: make(map[streamKey]prometheus.Labels),
 	}
 	s.gauge = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Namespace: metricNamespace,
-		Name:      subscriptionStatusName,
-		Help: "Redfish event push-subscription status per BMC: 1 = active push subscription, " +
-			"0 = not subscribed. The reason label explains the current state.",
-	}, []string{labelHostname, "vendor", "model", "reason"})
+		Name:      streamConnectionStatusName,
+		Help: "Redfish stream connection status per BMC per stream type: 1 = connected, " +
+			"0 = not connected. The reason label explains the current state.",
+	}, []string{labelHostname, "stream_type", "reason"})
 	if err := reg.Register(s.gauge); err != nil {
 		return nil, err
 	}
 	return s, nil
 }
 
-func (s *SubscriptionStatusSink) RecordSubscriptionStatus(bmcName, vendor, model, reason string) {
+func (s *StreamConnectionSink) RecordStreamStatus(bmcName, streamType, reason string) {
 	var v float64
-	if reason == "subscribed" {
+	if reason == "connected" {
 		v = 1
 	}
 	labels := prometheus.Labels{
 		labelHostname: bmcName,
-		"vendor":      vendor,
-		"model":       model,
+		"stream_type": streamType,
 		"reason":      reason,
 	}
+	key := streamKey{bmcName, streamType}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if prev, ok := s.tracked[bmcName]; ok && !subscriptionLabelsEqual(prev, labels) {
+	if prev, ok := s.tracked[key]; ok && !streamLabelsEqual(prev, labels) {
 		s.gauge.Delete(prev)
 	}
-	s.tracked[bmcName] = labels
+	s.tracked[key] = labels
 	s.gauge.With(labels).Set(v)
 }
 
-// ForgetSubscriptionStatus removes the series for the given BMC. Idempotent.
-func (s *SubscriptionStatusSink) ForgetSubscriptionStatus(bmcName string) {
+// ForgetStreamStatus removes both stream_type series for the given BMC. Idempotent.
+func (s *StreamConnectionSink) ForgetStreamStatus(bmcName string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if prev, ok := s.tracked[bmcName]; ok {
-		s.gauge.Delete(prev)
-		delete(s.tracked, bmcName)
+	for _, streamType := range []string{"metrics", "alerts"} {
+		key := streamKey{bmcName, streamType}
+		if prev, ok := s.tracked[key]; ok {
+			s.gauge.Delete(prev)
+			delete(s.tracked, key)
+		}
 	}
 }
 
-func subscriptionLabelsEqual(a, b prometheus.Labels) bool {
+func streamLabelsEqual(a, b prometheus.Labels) bool {
 	if len(a) != len(b) {
 		return false
 	}

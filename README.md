@@ -134,41 +134,47 @@ absent(redfish_event_pipeline_test_timestamp)
 
 ---
 
-### `redfish_bmc_event_subscription_status` — Gauge
+### `redfish_stream_connection_status` — Gauge
 
-Push-subscription health per BMC. Value is `1` when the BMC has an active push subscription; `0` otherwise. Emitted for every BMC the operator manages — including those using SSE, excluded by config, or failing the vendor probe — so absence of this metric indicates an untracked BMC rather than a healthy one.
+Per-stream connection health for every managed BMC. Each BMC always emits exactly **two** series — one for `stream_type="metrics"` and one for `stream_type="alerts"`. Value is `1` when the stream is connected; `0` otherwise. Absence of the metric for a given hostname indicates an untracked BMC rather than a disconnected one.
 
 | Label | Description |
 |-------|-------------|
 | `hostname` | BMC resource name in Kubernetes |
-| `vendor` | BMC manufacturer (`bmc.status.manufacturer`) |
-| `model` | BMC model (`bmc.status.model`) |
-| `reason` | Subscription state: `subscribed`, `slots_full`, `sse_mode`, `excluded`, or `probe_failed` |
+| `stream_type` | Stream being tracked: `metrics` or `alerts` |
+| `reason` | Connection state (see table below) |
 
 **Reason values:**
 
 | Reason | Value | Description |
 |--------|-------|-------------|
-| `subscribed` | 1 | Both MetricReport and alerts EventDestination subscriptions are active |
-| `slots_full` | 0 | BMC rejected subscription creation with HTTP 409 (no available slots) |
-| `sse_mode` | 0 | BMC uses SSE delivery; push subscriptions are not created |
+| `connected` | 1 | Stream is live (SSE HTTP 200 received, or push subscription active) |
+| `disconnected` | 0 | Stream dropped; SSE is reconnecting or push subscription was removed |
+| `slots_full` | 0 | Push: BMC rejected subscription creation with HTTP 409 (no available slots) |
 | `excluded` | 0 | BMC matched an `excludeHardware` config rule |
 | `probe_failed` | 0 | Vendor probe returned an error or reached its retry cap |
+
+For **push-mode** BMCs, both `metrics` and `alerts` series always carry the same reason because MetricReport and alert EventDestination subscriptions are managed together. For **SSE-mode** BMCs, each stream is tracked independently — the metrics stream can be `connected` while the alerts stream is `disconnected`.
 
 **Example queries:**
 
 ```promql
-# BMCs with no active push subscription
-redfish_bmc_event_subscription_status == 0
+# BMCs where any stream is not connected
+redfish_stream_connection_status == 0
 
-# Subscription health breakdown by reason
-count by (reason) (redfish_bmc_event_subscription_status)
+# Connection health breakdown by reason across all streams
+count by (reason) (redfish_stream_connection_status)
 
-# BMCs that failed to subscribe due to slot exhaustion
-redfish_bmc_event_subscription_status{reason="slots_full"}
+# BMCs where the metrics stream is connected
+redfish_stream_connection_status{stream_type="metrics", reason="connected"}
 
-# Push subscription rate across the fleet
-sum(redfish_bmc_event_subscription_status{reason="subscribed"}) / count(redfish_bmc_event_subscription_status)
+# Count of BMCs with both streams fully connected
+count(
+  min by (hostname) (redfish_stream_connection_status{reason="connected"}) == 1
+)
+
+# BMCs that failed to subscribe due to slot exhaustion (push mode)
+redfish_stream_connection_status{reason="slots_full"}
 ```
 
 ---

@@ -77,9 +77,9 @@ type BMCReconciler struct {
 	// testSink records pipeline health-check results. Exposed so main.go can pass
 	// it to push.AddTo; Forget is called in deletion paths.
 	testSink *prometheusSink.TestEventSink
-	// statusSink records per-BMC push-subscription health as a Prometheus gauge.
+	// statusSink records per-stream connection health as a Prometheus gauge.
 	// Exposed via StatusSink() so main.go can pass it to push.AddTo.
-	statusSink *prometheusSink.SubscriptionStatusSink
+	statusSink *prometheusSink.StreamConnectionSink
 
 	// probeFailures tracks consecutive EventService probe failures per BMC (key: BMC name, value: int).
 	probeFailures sync.Map
@@ -147,9 +147,9 @@ func (r *BMCReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		}
 		r.testSink = ts
 
-		ss, ssErr := prometheusSink.NewSubscriptionStatusSink(ctrlmetrics.Registry)
+		ss, ssErr := prometheusSink.NewStreamConnectionSink(ctrlmetrics.Registry)
 		if ssErr != nil {
-			initErr = fmt.Errorf("create subscription status sink: %w", ssErr)
+			initErr = fmt.Errorf("create stream connection sink: %w", ssErr)
 			return
 		}
 		r.statusSink = ss
@@ -158,6 +158,7 @@ func (r *BMCReconciler) SetupWithManager(mgr ctrl.Manager) error {
 			int64(r.MaxConcurrentConnects),
 			s,
 			r,                // BMCReconciler implements sse.StatusWriter
+			r.statusSink,     // records per-stream connection status in Prometheus
 			r.AlertEventSink, // routes SSE alert events through the same pipeline as push
 			nil,              // TestFilter: wired after push.AddTo via SetSSETestFilter
 			r.testSink,       // records pipeline health-check results
@@ -218,7 +219,7 @@ func (r *BMCReconciler) TestSink() *prometheusSink.TestEventSink {
 	return r.testSink
 }
 
-func (r *BMCReconciler) StatusSink() *prometheusSink.SubscriptionStatusSink {
+func (r *BMCReconciler) StatusSink() *prometheusSink.StreamConnectionSink {
 	return r.statusSink
 }
 
@@ -263,7 +264,8 @@ func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	host, username, password, vendorCfg, requeue := r.probeEventServiceForBMC(ctx, bmc, metricsTel, alertsTel)
 	if requeue > 0 {
 		if r.statusSink != nil {
-			r.statusSink.RecordSubscriptionStatus(bmc.Name, bmc.Status.Manufacturer, bmc.Status.Model, "probe_failed")
+			r.statusSink.RecordStreamStatus(bmc.Name, "metrics", "probe_failed")
+			r.statusSink.RecordStreamStatus(bmc.Name, "alerts", "probe_failed")
 		}
 		return ctrl.Result{RequeueAfter: requeue}, nil
 	}
@@ -306,9 +308,6 @@ func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	if err := r.updateTelemetryStatus(ctx, alertsTel, telemetryv1alpha1.TelemetryModeSSE, vendorCfg, alertsTel.Status.ConnectionState); err != nil {
 		return ctrl.Result{}, err
 	}
-	if r.statusSink != nil {
-		r.statusSink.RecordSubscriptionStatus(bmc.Name, bmc.Status.Manufacturer, bmc.Status.Model, "sse_mode")
-	}
 
 	if r.sseTestFirer != nil {
 		if fireErr := r.sseTestFirer(ctx, bmc.Name, host, username, password, bmc.Status.Manufacturer, bmc.Status.Model); fireErr != nil {
@@ -325,7 +324,7 @@ func (r *BMCReconciler) forgetBMC(name string) {
 	r.sinkInst.Forget(name)
 	r.testSink.Forget(name)
 	if r.statusSink != nil {
-		r.statusSink.ForgetSubscriptionStatus(name)
+		r.statusSink.ForgetStreamStatus(name)
 	}
 }
 
@@ -353,7 +352,8 @@ func (r *BMCReconciler) stopAndApplyNonSSEMode(
 		return err
 	}
 	if mode == telemetryv1alpha1.TelemetryModeExcluded && r.statusSink != nil {
-		r.statusSink.RecordSubscriptionStatus(bmc.Name, bmc.Status.Manufacturer, bmc.Status.Model, "excluded")
+		r.statusSink.RecordStreamStatus(bmc.Name, "metrics", "excluded")
+		r.statusSink.RecordStreamStatus(bmc.Name, "alerts", "excluded")
 	}
 	if mode != telemetryv1alpha1.TelemetryModeUnsupported && r.EnqueuePushBMC != nil {
 		r.EnqueuePushBMC(bmc.Name)

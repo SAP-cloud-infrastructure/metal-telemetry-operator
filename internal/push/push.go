@@ -54,9 +54,9 @@ type Options struct {
 	// TestRecorder receives pipeline health-check results from push round-trips.
 	// Wire this to the shared TestEventSink created by BMCReconciler.SetupWithManager.
 	TestRecorder TestResultRecorder
-	// StatusRecorder receives per-BMC push-subscription health updates.
-	// Wire this to the shared SubscriptionStatusSink created by BMCReconciler.SetupWithManager.
-	StatusRecorder SubscriptionStatusRecorder
+	// StatusRecorder receives per-stream connection status updates.
+	// Wire this to the shared StreamConnectionSink created by BMCReconciler.SetupWithManager.
+	StatusRecorder StreamConnectionRecorder
 	// ConsumeIfTestOut, when non-nil, is filled in by AddTo with the push
 	// reconciler's ConsumeIfTest implementation. Call BMCReconciler.SetSSETestFilter
 	// with this value after AddTo returns to wire the SSE path.

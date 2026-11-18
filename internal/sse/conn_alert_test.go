@@ -101,7 +101,7 @@ func TestConn_AlertEventRouting(t *testing.T) {
 	es := newMockEventSink()
 	tf := &mockConsumeIfTest{}
 
-	mgr := sse.NewConnectionManager(10, nil, nil, es, tf, nil, logr.Discard())
+	mgr := sse.NewConnectionManager(10, nil, nil, nil, es, tf, nil, logr.Discard())
 
 	cfg := sse.ConnConfig{
 		BMCName:    "bmc-alerttest",
@@ -159,7 +159,7 @@ func TestConn_AlertEventRouting_NilTestFilter(t *testing.T) {
 	es := newMockEventSink()
 
 	// No test filter — all events including Base.1.0.TestMessage reach the sink.
-	mgr := sse.NewConnectionManager(10, nil, nil, es, nil, nil, logr.Discard())
+	mgr := sse.NewConnectionManager(10, nil, nil, nil, es, nil, nil, logr.Discard())
 
 	cfg := sse.ConnConfig{
 		BMCName:    "bmc-notestfilter",
@@ -200,7 +200,7 @@ func TestConn_AlertEventRouting_RecordTestResult(t *testing.T) {
 	tf := &mockConsumeIfTest{}
 	tr := &mockTestResultRecorder{}
 
-	mgr := sse.NewConnectionManager(10, nil, nil, es, tf, tr, logr.Discard())
+	mgr := sse.NewConnectionManager(10, nil, nil, nil, es, tf, tr, logr.Discard())
 
 	cfg := sse.ConnConfig{
 		BMCName:    "bmc-testrecorder",

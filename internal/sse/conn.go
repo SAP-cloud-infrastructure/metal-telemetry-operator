@@ -25,6 +25,24 @@ const (
 	backoffFactor  = 2.0
 )
 
+// StreamConnectionRecorder records per-stream Prometheus connection status from the SSE goroutine.
+// Implementations must be safe for concurrent use. May be nil to disable recording.
+type StreamConnectionRecorder interface {
+	RecordStreamStatus(bmcName, streamType, reason string)
+}
+
+// streamTypeLabel maps a StreamKind to its stream_type label value.
+func streamTypeLabel(k telemetryv1alpha1.StreamKind) string {
+	switch k {
+	case telemetryv1alpha1.StreamKindMetrics:
+		return "metrics"
+	case telemetryv1alpha1.StreamKindAlerts:
+		return "alerts"
+	default:
+		return strings.ToLower(string(k))
+	}
+}
+
 // ConnConfig holds the parameters needed to open and maintain one SSE connection.
 type ConnConfig struct {
 	BMCName    string
@@ -57,6 +75,7 @@ type sseConn struct {
 	cfg          ConnConfig
 	sink         sink.MetricReportSink
 	sw           StatusWriter
+	recorder     StreamConnectionRecorder
 	eventSink    sink.EventSink
 	testFilter   ConsumeIfTest
 	testRecorder TestResultRecorder
@@ -66,12 +85,13 @@ type sseConn struct {
 }
 
 // start launches the SSE goroutine. Call stop() to terminate it.
-func startConn(ctx context.Context, cfg ConnConfig, s sink.MetricReportSink, sw StatusWriter) *sseConn {
+func startConn(ctx context.Context, cfg ConnConfig, s sink.MetricReportSink, sw StatusWriter, recorder StreamConnectionRecorder) *sseConn {
 	connCtx, cancel := context.WithCancel(ctx)
 	c := &sseConn{
 		cfg:          cfg,
 		sink:         s,
 		sw:           sw,
+		recorder:     recorder,
 		eventSink:    cfg.EventSink,
 		testFilter:   cfg.TestFilter,
 		testRecorder: cfg.TestRecorder,
@@ -101,6 +121,9 @@ func (c *sseConn) run(ctx context.Context) {
 		if c.sw != nil {
 			_ = c.sw.SetConnected(ctx, c.cfg.BMCName, c.cfg.StreamKind, false)
 			_ = c.sw.IncrReconnectCount(ctx, c.cfg.BMCName, c.cfg.StreamKind)
+		}
+		if c.recorder != nil {
+			c.recorder.RecordStreamStatus(c.cfg.BMCName, streamTypeLabel(c.cfg.StreamKind), "disconnected")
 		}
 		// Add jitter (±25% of backoff)
 		jitter := time.Duration(float64(backoff) * (0.75 + rand.Float64()*0.5)) //nolint:gosec
@@ -145,6 +168,9 @@ func (c *sseConn) stream(ctx context.Context) error {
 
 	if c.sw != nil {
 		_ = c.sw.SetConnected(ctx, c.cfg.BMCName, c.cfg.StreamKind, true)
+	}
+	if c.recorder != nil {
+		c.recorder.RecordStreamStatus(c.cfg.BMCName, streamTypeLabel(c.cfg.StreamKind), "connected")
 	}
 	c.log.Info("SSE stream connected")
 

@@ -245,21 +245,6 @@ helm: build-installer kubebuilder ## Regenerate dist/chart/ from dist/install.ya
 helm-force: build-installer kubebuilder ## Regenerate dist/chart/ from dist/install.yaml (force).
 	"$(KUBEBUILDER)" edit --plugins=helm/v2-alpha --force
 
-.PHONY: helm-deploy
-helm-deploy: ## Deploy manager to the K8s cluster via Helm. Specify an image with IMG.
-	IMG="$(IMG)"; $(HELM) upgrade --install $(HELM_RELEASE) $(HELM_CHART_DIR) \
-		--namespace $(HELM_NAMESPACE) \
-		--create-namespace \
-		--set manager.image.repository=$${IMG%:*} \
-		--set manager.image.tag=$${IMG##*:} \
-		--wait \
-		--timeout 5m \
-		$(HELM_EXTRA_ARGS)
-
-.PHONY: helm-uninstall
-helm-uninstall: ## Uninstall the Helm release from the K8s cluster.
-	$(HELM) uninstall $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
-
 .PHONY: kustomize
 kustomize: $(KUSTOMIZE) ## Download kustomize locally if necessary.
 $(KUSTOMIZE): $(LOCALBIN)

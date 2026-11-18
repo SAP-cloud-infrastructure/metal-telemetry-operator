@@ -62,11 +62,10 @@ type TestResultRecorder interface {
 	RecordTestResult(bmcName, result string)
 }
 
-// SubscriptionStatusRecorder records per-BMC push-subscription health.
-// Implemented by the Prometheus subscription status sink; may be nil to disable recording.
-type SubscriptionStatusRecorder interface {
-	RecordSubscriptionStatus(bmcName, vendor, model, reason string)
-	ForgetSubscriptionStatus(bmcName string)
+// StreamConnectionRecorder records per-stream connection status.
+// Implemented by the Prometheus stream connection sink; may be nil to disable recording.
+type StreamConnectionRecorder interface {
+	RecordStreamStatus(bmcName, streamType, reason string)
 }
 
 // ReconcilerConfig holds all parameters for constructing a SubscriptionReconciler.
@@ -108,8 +107,8 @@ type SubscriptionReconciler struct {
 	lastTestTime sync.Map // bmcName → time.Time
 	// TestRecorder receives pipeline health-check results. May be nil.
 	TestRecorder TestResultRecorder
-	// StatusRecorder receives per-BMC push-subscription health updates. May be nil.
-	StatusRecorder SubscriptionStatusRecorder
+	// StatusRecorder receives per-stream connection status updates. May be nil.
+	StatusRecorder StreamConnectionRecorder
 }
 
 // NewSubscriptionReconciler constructs a SubscriptionReconciler ready for
@@ -252,7 +251,7 @@ func (r *SubscriptionReconciler) ensureSubscriptions(ctx context.Context, bmc *m
 			if errors.Is(err, ErrSubscriptionSlotsFull) {
 				r.setConnState(ctx, bmc.Name+"-metrics", telemetryv1alpha1.ConnectionStateSlotsFull)
 				if r.StatusRecorder != nil {
-					r.StatusRecorder.RecordSubscriptionStatus(bmc.Name, bmc.Status.Manufacturer, bmc.Status.Model, "slots_full")
+					r.StatusRecorder.RecordStreamStatus(bmc.Name, "metrics", "slots_full")
 				}
 			}
 			return fmt.Errorf("create MetricReport subscription: %w", err)
@@ -268,7 +267,7 @@ func (r *SubscriptionReconciler) ensureSubscriptions(ctx context.Context, bmc *m
 			if errors.Is(err, ErrSubscriptionSlotsFull) {
 				r.setConnState(ctx, bmc.Name+"-alerts", telemetryv1alpha1.ConnectionStateSlotsFull)
 				if r.StatusRecorder != nil {
-					r.StatusRecorder.RecordSubscriptionStatus(bmc.Name, bmc.Status.Manufacturer, bmc.Status.Model, "slots_full")
+					r.StatusRecorder.RecordStreamStatus(bmc.Name, "alerts", "slots_full")
 				}
 			}
 			return fmt.Errorf("create alerts subscription: %w", err)
@@ -277,7 +276,8 @@ func (r *SubscriptionReconciler) ensureSubscriptions(ctx context.Context, bmc *m
 	}
 	r.setConnState(ctx, bmc.Name+"-alerts", telemetryv1alpha1.ConnectionStateSubscriptionActive)
 	if r.StatusRecorder != nil {
-		r.StatusRecorder.RecordSubscriptionStatus(bmc.Name, bmc.Status.Manufacturer, bmc.Status.Model, "subscribed")
+		r.StatusRecorder.RecordStreamStatus(bmc.Name, "metrics", "connected")
+		r.StatusRecorder.RecordStreamStatus(bmc.Name, "alerts", "connected")
 	}
 	r.maybeRunTestEvent(ctx, rc, bmc.Name, bmc.Status.Manufacturer, bmc.Status.Model)
 	return nil
