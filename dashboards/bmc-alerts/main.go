@@ -52,6 +52,7 @@ func main() {
 
 	bb, nodename, _ := mto.TopologyMetricLabels(cfg)
 	region := mto.TopologyRegionLabel(cfg)
+	minutesUnit := string(common.MinutesUnit)
 
 	exec := sdk.NewExec()
 	builder, buildErr := dashboard.New("bmc-alerts",
@@ -129,14 +130,56 @@ func main() {
 		// ── Fleet Overview ─────────────────────────────────────────────────────────
 
 		dashboard.AddPanelGroup("Fleet Overview",
-			panelgroup.PanelsPerLine(1),
+			panelgroup.PanelsPerLine(5),
 			panelgroup.PanelHeight(4),
-			panelgroup.AddPanel("Total BMCs in Selected Building Block",
+			panelgroup.AddPanel("Total BMCs in Building Block",
 				stat.Chart(),
-				panel.Description("Total BMC resources managed in the selected building block. Use this as the denominator when interpreting pipeline health and alert counts below."),
+				panel.Description("Total number of BMCs in the selected building block, regardless of monitoring state. This is the full fleet count — use it as the starting point when reading the other panels."),
 				panel.AddQuery(
 					mto.PromQL(
-						`count(kube_ironcore_bmc_info{`+region+`=~"$region",`+bb+`=~"$bb",`+nodename+`=~"$node",manufacturer=~"$manufacturer",model=~"$model"}) or vector(0)`,
+						`count(`+
+							`label_replace(kube_ironcore_bmc_info{`+region+`=~"$region",`+bb+`=~"$bb",`+nodename+`=~"$node",manufacturer=~"$manufacturer",model=~"$model"}, "hostname", "$1", "name", "(.*)")`+
+							`) or vector(0)`,
+						"$datasource",
+					),
+				),
+			),
+			panelgroup.AddPanel("Active Connections",
+				stat.Chart(),
+				panel.Description("Number of BMCs with an active metrics stream connection (reason=connected). BMCs that are excluded, probe_failed, or disconnected are not counted here."),
+				panel.AddQuery(
+					mto.PromQL(
+						`count(`+bbJoin(cfg, `(redfish_stream_connection_status{stream_type="metrics",reason="connected"} == 1)`)+`) or vector(0)`,
+						"$datasource",
+					),
+				),
+			),
+			panelgroup.AddPanel("Probe Failed",
+				stat.Chart(),
+				panel.Description("Number of BMCs where the vendor probe failed or hit its retry cap. These BMCs cannot be contacted for telemetry — check the BMC firmware version and network connectivity."),
+				panel.AddQuery(
+					mto.PromQL(
+						`count(`+bbJoin(cfg, `(redfish_stream_connection_status{stream_type="metrics",reason="probe_failed"})`)+`) or vector(0)`,
+						"$datasource",
+					),
+				),
+			),
+			panelgroup.AddPanel("BMCs Excluded from Monitoring",
+				stat.Chart(),
+				panel.Description("Number of BMCs explicitly excluded from telemetry collection via the excludeHardware configuration rule. These servers will not report metrics or alerts; exclusions are intentional and operator-configured."),
+				panel.AddQuery(
+					mto.PromQL(
+						`count(`+bbJoin(cfg, `(redfish_stream_connection_status{stream_type="metrics",reason="excluded"})`)+`) or vector(0)`,
+						"$datasource",
+					),
+				),
+			),
+			panelgroup.AddPanel("BMCs with Active Critical Condition",
+				stat.Chart(),
+				panel.Description("Number of servers currently carrying an active CriticalEventReceived condition. Unlike alert counters, this is a live state gauge — non-zero means at least one server has an unresolved critical hardware condition right now."),
+				panel.AddQuery(
+					mto.PromQL(
+						`count(`+bbJoin(cfg, `(redfish_server_critical_alert > 0)`)+`) or vector(0)`,
 						"$datasource",
 					),
 				),
@@ -198,6 +241,63 @@ func main() {
 								},
 							},
 						},
+						{Name: "value #3", Header: "Metrics Subscription", EnableSorting: true, Hide: false,
+							CellSettings: []table.CellSettings{
+								{
+									Condition: table.Condition{
+										Kind: table.RangeConditionKind,
+										Spec: &table.RangeConditionSpec{Min: 1},
+									},
+									TextColor: "#73BF69",
+								},
+								{
+									Condition: table.Condition{
+										Kind: table.RegexConditionKind,
+										Spec: &table.RegexConditionSpec{Expr: ".+"},
+									},
+									TextColor:       "#F2495C",
+									BackgroundColor: "#2C1117",
+								},
+							},
+						},
+						{Name: "value #4", Header: "Alerts Subscription", EnableSorting: true, Hide: false,
+							CellSettings: []table.CellSettings{
+								{
+									Condition: table.Condition{
+										Kind: table.RangeConditionKind,
+										Spec: &table.RangeConditionSpec{Min: 1},
+									},
+									TextColor: "#73BF69",
+								},
+								{
+									Condition: table.Condition{
+										Kind: table.RegexConditionKind,
+										Spec: &table.RegexConditionSpec{Expr: ".+"},
+									},
+									TextColor:       "#F2495C",
+									BackgroundColor: "#2C1117",
+								},
+							},
+						},
+						{Name: "value #5", Header: "Active Critical", EnableSorting: true, Sort: table.DescSort, Hide: false,
+							CellSettings: []table.CellSettings{
+								{
+									Condition: table.Condition{
+										Kind: table.RangeConditionKind,
+										Spec: &table.RangeConditionSpec{Min: 1},
+									},
+									TextColor:       "#F2495C",
+									BackgroundColor: "#2C1117",
+								},
+								{
+									Condition: table.Condition{
+										Kind: table.RegexConditionKind,
+										Spec: &table.RegexConditionSpec{Expr: ".+"},
+									},
+									TextColor: "#73BF69",
+								},
+							},
+						},
 					}),
 					table.Transform([]common.Transform{
 						{Kind: common.MergeSeriesKind, Spec: &common.MergeSeriesSpec{}},
@@ -232,6 +332,94 @@ func main() {
 						"$datasource",
 					),
 				),
+				// Metrics subscription status (0/1) per BMC: aggregated to drop the reason label
+				panel.AddQuery(
+					mto.PromQL(
+						`sum by(name, manufacturer, model, firmware_version, `+region+`, `+bb+`)(`+
+							`label_replace(redfish_stream_connection_status{stream_type="metrics"}, "name", "$1", "hostname", "(.*)")`+
+							` * on(name) group_left(manufacturer, model, firmware_version, `+region+`, `+bb+`)`+
+							` kube_ironcore_bmc_info{`+region+`=~"$region",`+bb+`=~"$bb",`+nodename+`=~"$node",manufacturer=~"$manufacturer",model=~"$model"}`+
+							`)`+
+							` or sum by(name, manufacturer, model, firmware_version, `+region+`, `+bb+`)(`+
+							`kube_ironcore_bmc_info{`+region+`=~"$region",`+bb+`=~"$bb",`+nodename+`=~"$node",manufacturer=~"$manufacturer",model=~"$model"}`+
+							`) * 0`,
+						"$datasource",
+					),
+				),
+				// Alerts subscription status (0/1) per BMC: aggregated to drop the reason label
+				panel.AddQuery(
+					mto.PromQL(
+						`sum by(name, manufacturer, model, firmware_version, `+region+`, `+bb+`)(`+
+							`label_replace(redfish_stream_connection_status{stream_type="alerts"}, "name", "$1", "hostname", "(.*)")`+
+							` * on(name) group_left(manufacturer, model, firmware_version, `+region+`, `+bb+`)`+
+							` kube_ironcore_bmc_info{`+region+`=~"$region",`+bb+`=~"$bb",`+nodename+`=~"$node",manufacturer=~"$manufacturer",model=~"$model"}`+
+							`)`+
+							` or sum by(name, manufacturer, model, firmware_version, `+region+`, `+bb+`)(`+
+							`kube_ironcore_bmc_info{`+region+`=~"$region",`+bb+`=~"$bb",`+nodename+`=~"$node",manufacturer=~"$manufacturer",model=~"$model"}`+
+							`) * 0`,
+						"$datasource",
+					),
+				),
+				// Active critical condition (0/1) per BMC
+				panel.AddQuery(
+					mto.PromQL(
+						`sum by(name, manufacturer, model, firmware_version, `+region+`, `+bb+`)(`+
+							`label_replace(redfish_server_critical_alert, "name", "$1", "hostname", "(.*)")`+
+							` * on(name) group_left(manufacturer, model, firmware_version, `+region+`, `+bb+`)`+
+							` kube_ironcore_bmc_info{`+region+`=~"$region",`+bb+`=~"$bb",`+nodename+`=~"$node",manufacturer=~"$manufacturer",model=~"$model"}`+
+							`)`+
+							` or sum by(name, manufacturer, model, firmware_version, `+region+`, `+bb+`)(`+
+							`kube_ironcore_bmc_info{`+region+`=~"$region",`+bb+`=~"$bb",`+nodename+`=~"$node",manufacturer=~"$manufacturer",model=~"$model"}`+
+							`) * 0`,
+						"$datasource",
+					),
+				),
+			),
+		),
+
+		// ── Subscription Status ────────────────────────────────────────────────────
+
+		dashboard.AddPanelGroup("Subscription Status",
+			panelgroup.PanelsPerLine(1),
+			panelgroup.PanelHeight(10),
+			panelgroup.AddPanel("BMC Subscription Status",
+				table.Table(
+					table.WithEnableSorting(true),
+					table.WithDefaultColumnHidden(true),
+					table.WithEnableFiltering(true),
+					table.WithColumnSettings([]table.ColumnSettings{
+						{Name: "hostname", Header: "BMC", EnableSorting: true, Hide: false},
+						{Name: "stream_type", Header: "Stream", EnableSorting: true, Hide: false},
+						{Name: "reason", Header: "Reason", EnableSorting: true, Hide: false},
+						{Name: "value", Header: "Status", EnableSorting: true, Sort: table.DescSort, Hide: false,
+							CellSettings: []table.CellSettings{
+								{
+									Condition: table.Condition{
+										Kind: table.RangeConditionKind,
+										Spec: &table.RangeConditionSpec{Min: 1},
+									},
+									TextColor: "#73BF69",
+								},
+								{
+									Condition: table.Condition{
+										Kind: table.RegexConditionKind,
+										Spec: &table.RegexConditionSpec{Expr: ".+"},
+									},
+									TextColor:       "#F2495C",
+									BackgroundColor: "#2C1117",
+								},
+							},
+						},
+					}),
+				),
+				panel.Description("Per-stream subscription status for every BMC. Each BMC appears twice — once for the metrics stream and once for the alerts stream. Reason values: 'connected'=live stream; 'disconnected'=dropped/reconnecting; 'excluded'=matched excludeHardware rule; 'probe_failed'=vendor detection failed; 'slots_full'=no Redfish subscription slot available."),
+				panel.AddQuery(
+					mto.PromQL(
+						bbJoin(cfg, `redfish_stream_connection_status`),
+						"$datasource",
+						"{{hostname}} {{stream_type}}",
+					),
+				),
 			),
 		),
 
@@ -240,13 +428,13 @@ func main() {
 		dashboard.AddPanelGroup("Pipeline Health",
 			panelgroup.PanelsPerLine(4),
 			panelgroup.PanelHeight(4),
-			panelgroup.AddPanel("Healthy Hosts (age < 5 min)",
+			panelgroup.AddPanel("Healthy Hosts (age < 10 min)",
 				stat.Chart(),
-				panel.Description("Hosts where the last successful pipeline health-check is less than 5 minutes old. This is the expected state for all hosts. Any host not counted here needs investigation."),
+				panel.Description("Hosts where the last successful pipeline health-check is less than 10 minutes old. This is the expected state for all hosts. Any host not counted here needs investigation."),
 				panel.AddQuery(
 					mto.PromQL(
 						`count(`+
-							`(time() - `+bbJoin(cfg, `redfish_event_pipeline_test_timestamp{result="success"}`)+`) < 300`+
+							`(time() - `+bbJoin(cfg, `redfish_event_pipeline_test_timestamp{result="success"}`)+`) < 600`+
 							`) or vector(0)`,
 						"$datasource",
 					),
@@ -266,22 +454,22 @@ func main() {
 					),
 				),
 			),
-			panelgroup.AddPanel("Worst Pipeline Age (s)",
+			panelgroup.AddPanel("Worst Pipeline Age (min)",
 				stat.Chart(),
 				panel.Description("Highest pipeline age across all selected hosts. If this exceeds the configured test interval the worst-performing host is not receiving health-check events. A spike here that quickly resolves indicates a transient delivery delay rather than a broken pipeline."),
 				panel.AddQuery(
 					mto.PromQL(
-						`max(time() - `+bbJoin(cfg, `redfish_event_pipeline_test_timestamp{result="success"}`)+`)`,
+						`round(max(time() - `+bbJoin(cfg, `redfish_event_pipeline_test_timestamp{result="success"}`)+`) / 60)`,
 						"$datasource",
 					),
 				),
 			),
-			panelgroup.AddPanel("Median Pipeline Age (s)",
+			panelgroup.AddPanel("Median Pipeline Age (min)",
 				stat.Chart(),
 				panel.Description("Median pipeline age across all selected hosts. A healthy fleet shows a value close to the test interval. A rising median means widespread degradation across the building block, not just an isolated host failure."),
 				panel.AddQuery(
 					mto.PromQL(
-						`quantile(0.5, time() - `+bbJoin(cfg, `redfish_event_pipeline_test_timestamp{result="success"}`)+`)`,
+						`round(quantile(0.5, time() - `+bbJoin(cfg, `redfish_event_pipeline_test_timestamp{result="success"}`)+`) / 60)`,
 						"$datasource",
 					),
 				),
@@ -319,15 +507,66 @@ func main() {
 		dashboard.AddPanelGroup("Per-Host Pipeline Detail",
 			panelgroup.PanelsPerLine(1),
 			panelgroup.PanelHeight(10),
-			panelgroup.AddPanel("Pipeline Health Age by Host",
+			panelgroup.AddPanel("Pipeline Status per Host",
 				table.Table(
 					table.WithEnableSorting(true),
+					table.WithDefaultColumnHidden(true),
 					table.WithEnableFiltering(true),
+					table.Transform([]common.Transform{{Kind: common.MergeSeriesKind, Spec: &common.MergeSeriesSpec{}}}),
+					table.WithColumnSettings([]table.ColumnSettings{
+						{Name: "hostname", Header: "Host", EnableSorting: true, Hide: false},
+						{Name: "manufacturer", Header: "Manufacturer", EnableSorting: true, Hide: false},
+						{Name: "model", Header: "Model", EnableSorting: true, Hide: false},
+						{Name: region, Header: "Region", EnableSorting: true, Hide: false},
+						{Name: bb, Header: cfg.Topology.BB.DisplayName, EnableSorting: true, Hide: false},
+						{Name: "reason", Header: "Connection Status", EnableSorting: true, Hide: false},
+						{Name: "value #1", Header: "Connected", EnableSorting: true, Hide: true},
+						{Name: "value #2", Header: "Age Since Last Test Event (min)", EnableSorting: true, Sort: table.DescSort, Hide: false,
+							Format: &common.Format{Unit: &minutesUnit},
+							CellSettings: []table.CellSettings{
+								{
+									Condition:       table.Condition{Kind: table.RangeConditionKind, Spec: table.RangeConditionSpec{Min: -1, Max: 10}},
+									BackgroundColor: "#1a9644",
+									TextColor:       "#ffffff",
+								},
+								{
+									Condition:       table.Condition{Kind: table.RangeConditionKind, Spec: table.RangeConditionSpec{Min: 10}},
+									BackgroundColor: "#d44a3a",
+									TextColor:       "#ffffff",
+								},
+							},
+						},
+					}),
 				),
-				panel.Description("Current pipeline age per host. Sort by value descending to surface the most degraded hosts immediately. A growing age beyond the configured test interval means health-check events are not being delivered for that host. Use the Node filter above to drill into specific hosts."),
+				panel.Description("Pipeline status per host. 'Connection Status' shows the current metrics stream state (connected/probe_failed/excluded/etc). 'Age Since Last Test Event' shows how long ago the last pipeline test event was received — green = within 10 min (healthy), red = stale. BMCs with no age have a connected subscription but have not received a test event yet (e.g. firmware does not emit test events, or operator just started)."),
 				panel.AddQuery(
 					mto.PromQL(
-						`time() - `+bbJoin(cfg, `redfish_event_pipeline_test_timestamp{result="success"}`),
+						`sum by(hostname, reason, manufacturer, model, `+region+`, `+bb+`) (`+
+							`label_replace(redfish_stream_connection_status{stream_type="metrics"}, "hostname", "$1", "hostname", "(.*)")`+
+							` * on(hostname) group_left(manufacturer, model, `+region+`, `+bb+`) `+
+							`label_replace(kube_ironcore_bmc_info{`+
+							region+`=~"$region",`+bb+`=~"$bb",`+nodename+`=~"$node",`+
+							`manufacturer=~"$manufacturer",model=~"$model"}, "hostname", "$1", "name", "(.*)")`+
+							`)`,
+						"$datasource",
+						"{{hostname}}",
+					),
+				),
+				panel.AddQuery(
+					mto.PromQL(
+						`sum by(hostname, reason, manufacturer, model, `+region+`, `+bb+`) (`+
+							`(`+
+							`round((time() - (`+
+							`redfish_event_pipeline_test_timestamp{result="success"}`+
+							` * on(hostname) group_left(manufacturer, model, `+region+`, `+bb+`) `+
+							`label_replace(kube_ironcore_bmc_info{`+
+							region+`=~"$region",`+bb+`=~"$bb",`+nodename+`=~"$node",`+
+							`manufacturer=~"$manufacturer",model=~"$model"}, "hostname", "$1", "name", "(.*)")`+
+							`)) / 60)`+
+							`)`+
+							` + on(hostname) group_left(reason) `+
+							`(0 * label_replace(redfish_stream_connection_status{stream_type="metrics"}, "hostname", "$1", "hostname", "(.*)"))`+
+							`)`,
 						"$datasource",
 						"{{hostname}}",
 					),
