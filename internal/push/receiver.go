@@ -5,6 +5,8 @@ package push
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -60,8 +62,10 @@ type ReceiverConfig struct {
 	// SharedSecret, when non-empty, enables bearer-token authentication on the
 	// alert and metricsreport endpoints. Every incoming POST must carry:
 	//
-	//   Authorization: Bearer <hex(SharedSecret)>
+	//   Authorization: Bearer <hex(HMAC-SHA256(SharedSecret, "bearer-token"))>
 	//
+	// The bearer token is derived from the shared secret rather than being the
+	// raw key, so intercepting a POST does not reveal the HMAC signing key.
 	// Requests without a matching token are rejected with 401. When nil or
 	// empty, the endpoints are unauthenticated (backward compatible). Configure
 	// the same token in the Redfish subscription HttpHeaders so BMCs include it
@@ -96,7 +100,7 @@ type Receiver struct {
 	alertsPath  string
 	metricsPath string
 	fetchSem    chan struct{}
-	bearerToken string // hex-encoded SharedSecret; empty disables auth
+	bearerToken string // hex(HMAC-SHA256(SharedSecret, "bearer-token")); empty disables auth
 }
 
 var (
@@ -127,7 +131,9 @@ func NewReceiver(cfg ReceiverConfig) (*Receiver, error) {
 		fetchSem:    make(chan struct{}, maxConcurrentFetches),
 	}
 	if len(cfg.SharedSecret) > 0 {
-		r.bearerToken = hex.EncodeToString(cfg.SharedSecret)
+		mac := hmac.New(sha256.New, cfg.SharedSecret)
+		mac.Write([]byte("bearer-token"))
+		r.bearerToken = hex.EncodeToString(mac.Sum(nil))
 	}
 	r.buildMux()
 	r.srv = &http.Server{
