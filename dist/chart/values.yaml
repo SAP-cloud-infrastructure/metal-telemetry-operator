@@ -241,6 +241,15 @@ prometheusRules:
 networkPolicy:
   enabled: false
 
+## ServerReadinessRule for automatic Server tainting on critical hardware alerts.
+## When enabled, deploys a ServerReadinessRule CR that applies a NoBind taint to any
+## Server whose CriticalEventReceived condition is True. Requires the metal-operator's
+## ServerReadinessRule controller to be running in the cluster.
+##
+serverReadinessRules:
+  criticalAlert:
+    enabled: false
+
 ## Extra Kubernetes objects to deploy alongside the chart.
 ## Each entry is rendered as a full YAML manifest; supports Helm templating.
 ##

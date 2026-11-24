@@ -1,0 +1,18 @@
+{{- if .Values.serverReadinessRules.criticalAlert.enabled }}
+---
+# SPDX-FileCopyrightText: SAP SE or an SAP affiliate company and IronCore contributors
+# SPDX-License-Identifier: Apache-2.0
+apiVersion: metal.ironcore.dev/v1alpha1
+kind: ServerReadinessRule
+metadata:
+  name: {{ include "metal-telemetry-operator.resourceName" (dict "suffix" "critical-hardware-alert" "context" $) }}
+spec:
+  enforcementMode: Continuous
+  conditions:
+    - type: CriticalEventReceived
+      requiredStatus: "True"
+  taint:
+    key: hardware.metal.ironcore.dev/critical-alert
+    effect: NoBind
+  serverSelector: {}
+{{- end }}

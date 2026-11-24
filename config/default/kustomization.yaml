@@ -31,6 +31,9 @@ resources:
 # Allow metrics traffic from pods in namespaces labeled 'metrics: enabled'.
 # Allow webhook traffic from all sources.
 #- ../network-policy
+# [SERVER READINESS RULES] Automatically taint Servers on critical hardware alerts.
+# Requires metal-operator's ServerReadinessRule controller to be running in the cluster.
+#- ../serverreadinessrules
 
 # Uncomment the patches line if you enable Metrics
 patches:
