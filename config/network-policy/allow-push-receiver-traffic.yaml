@@ -1,0 +1,15 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-push-receiver-traffic
+  namespace: system
+spec:
+  podSelector:
+    matchLabels:
+      control-plane: controller-manager
+  ingress:
+  - ports:
+    - port: 9093
+      protocol: TCP
+  policyTypes:
+  - Ingress

@@ -82,7 +82,7 @@ func AddTo(mgr ctrl.Manager, opts *Options) error {
 		}
 	}
 
-	if opts.EnableCriticalEventHandler {
+	if opts.EnableCriticalEventHandler || opts.EnableWarningEventHandler {
 		if err := mgr.GetFieldIndexer().IndexField(
 			context.Background(),
 			&metalv1alpha1.Server{},
@@ -97,7 +97,9 @@ func AddTo(mgr ctrl.Manager, opts *Options) error {
 		); err != nil {
 			return fmt.Errorf("add Server field indexer for %s: %w", criticalevent.BMCRefField, err)
 		}
+	}
 
+	if opts.EnableCriticalEventHandler {
 		condHandler := &criticalevent.ConditionHandler{
 			Client:        mgr.GetClient(),
 			Log:           log.WithName("critical-event"),
@@ -107,15 +109,6 @@ func AddTo(mgr ctrl.Manager, opts *Options) error {
 
 		eventSink.OnCritical = buildOnCritical(condHandler, opts)
 
-		if opts.EnableWarningEventHandler {
-			warnHandler := &warningevent.Handler{
-				Client:        mgr.GetClient(),
-				Log:           log.WithName("warning-event"),
-				EventRecorder: mgr.GetEventRecorder("metal-telemetry-operator"),
-			}
-			eventSink.OnWarning = buildOnWarning(warnHandler)
-		}
-
 		if err := mgr.Add(alertGaugePrewarmer{
 			client:      mgr.GetClient(),
 			condHandler: condHandler,
@@ -123,6 +116,15 @@ func AddTo(mgr ctrl.Manager, opts *Options) error {
 		}); err != nil {
 			return fmt.Errorf("add alert gauge prewarmer: %w", err)
 		}
+	}
+
+	if opts.EnableWarningEventHandler {
+		warnHandler := &warningevent.Handler{
+			Client:        mgr.GetClient(),
+			Log:           log.WithName("warning-event"),
+			EventRecorder: mgr.GetEventRecorder("metal-telemetry-operator"),
+		}
+		eventSink.OnWarning = buildOnWarning(warnHandler)
 	}
 
 	reconciler := NewSubscriptionReconciler(mgr.GetClient(), ReconcilerConfig{
@@ -187,6 +189,9 @@ func AddTo(mgr ctrl.Manager, opts *Options) error {
 // buildOnCritical creates the OnCritical hook that sets the Server condition
 // and optionally forwards the event to Alertmanager (URL from ConfigLoader).
 func buildOnCritical(condHandler *criticalevent.ConditionHandler, opts *Options) prometheusSink.OnCriticalFunc {
+	// Construct the HTTP client once so the connection pool is reused across
+	// events. URL is a public field and is updated in-place before each call.
+	amClient := alertmanager.New("", condHandler.Log)
 	return func(ctx context.Context, bmcName string, ev sink.Event) error {
 		if err := condHandler.HandleCritical(ctx, bmcName, ev); err != nil {
 			return err
@@ -199,7 +204,7 @@ func buildOnCritical(condHandler *criticalevent.ConditionHandler, opts *Options)
 			}
 		}
 		if amURL != "" {
-			amClient := alertmanager.New(amURL, condHandler.Log)
+			amClient.URL = amURL
 			amClient.Send(ctx, bmcName, ev)
 		}
 		return nil

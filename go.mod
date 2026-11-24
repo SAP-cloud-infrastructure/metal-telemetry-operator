@@ -1,6 +1,6 @@
 module github.com/SAP-cloud-infrastructure/metal-telemetry-operator
 
-go 1.27.4
+go 1.27
 
 require (
 	github.com/Masterminds/semver/v3 v3.4.0

@@ -8,7 +8,10 @@
 // consumes Redfish MetricReport-format pushes (numeric readings).
 package sink
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 // Event is one decoded Redfish event. Wire-level vendor quirks (Redfish
 // v1.5 field renames, Dell iDRAC plain-string OriginOfCondition) are
@@ -45,4 +48,17 @@ type Sample struct {
 type MetricReportSink interface {
 	PublishSamples(ctx context.Context, bmcName string, samples []Sample) error
 	Forget(bmcName string)
+}
+
+// ComponentFromOrigin returns the trailing path segment of a Redfish
+// OriginOfCondition URI. Empty input yields "system".
+func ComponentFromOrigin(origin string) string {
+	origin = strings.TrimRight(origin, "/")
+	if origin == "" {
+		return "system"
+	}
+	if i := strings.LastIndex(origin, "/"); i >= 0 {
+		return origin[i+1:]
+	}
+	return origin
 }

@@ -6,6 +6,7 @@ package push
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -342,32 +343,39 @@ func (r *SubscriptionReconciler) deleteAllSubscriptions(ctx context.Context, bmc
 	log := r.log.WithValues("bmc", bmc.Name)
 	c, err := r.buildClient(ctx, bmc)
 	if err != nil {
+		log.Error(err, "Could not build Redfish client for subscription cleanup")
 		return nil // best-effort: can't connect, nothing to clean up
 	}
 	defer c.Logout()
 
 	subs, err := c.ListEventSubscriptions(ctx)
 	if err != nil {
-		return nil // best-effort
+		log.Error(err, "Failed to list push subscriptions for cleanup")
+		return fmt.Errorf("list subscriptions on BMC %q: %w", bmc.Name, err)
 	}
 
+	var errs []error
 	current, stale := r.classify(subs, bmc.Name)
 	for _, s := range append(current, stale...) {
 		if delErr := c.DeleteEventSubscription(ctx, s.URI); delErr != nil {
 			log.Error(delErr, "Failed to delete push subscription", "uri", s.URI)
+			errs = append(errs, delErr)
 		} else {
 			log.Info("Deleted push subscription", "uri", s.URI)
 		}
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func (r *SubscriptionReconciler) tearDownOne(ctx context.Context, bmcName string) {
+	log := r.log.WithValues("bmc", bmcName)
 	bmc := &metalv1alpha1.BMC{}
 	if err := r.Get(ctx, types.NamespacedName{Name: bmcName}, bmc); err != nil {
 		return // BMC gone, nothing to tear down
 	}
-	_ = r.deleteAllSubscriptions(ctx, bmc)
+	if err := r.deleteAllSubscriptions(ctx, bmc); err != nil {
+		log.Error(err, "Failed to tear down push subscriptions")
+	}
 }
 
 func (r *SubscriptionReconciler) forgetSinks(bmcName string) {

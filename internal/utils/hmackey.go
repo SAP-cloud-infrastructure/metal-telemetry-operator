@@ -31,15 +31,30 @@ const (
 func EnsureHMACKey(ctx context.Context, c client.Client, namespace, name string) ([]byte, error) {
 	secret := &corev1.Secret{}
 	err := c.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, secret)
-	if err == nil {
+	if err != nil && !apierrors.IsNotFound(err) {
+		return nil, fmt.Errorf("get HMAC key secret %s/%s: %w", namespace, name, err)
+	}
+
+	secretExists := err == nil
+
+	if secretExists {
 		k := secret.Data[HMACKeyDataKey]
 		if len(k) == HMACKeyLen {
 			return k, nil
 		}
-	} else if !apierrors.IsNotFound(err) {
-		return nil, fmt.Errorf("get HMAC key secret %s/%s: %w", namespace, name, err)
+		// Secret exists but has an invalid key length — regenerate and update it.
+		key := make([]byte, HMACKeyLen)
+		if _, err := rand.Read(key); err != nil {
+			return nil, fmt.Errorf("generate HMAC key: %w", err)
+		}
+		secret.Data = map[string][]byte{HMACKeyDataKey: key}
+		if err := c.Update(ctx, secret); err != nil {
+			return nil, fmt.Errorf("update HMAC key secret %s/%s: %w", namespace, name, err)
+		}
+		return key, nil
 	}
 
+	// Secret does not exist — generate a new key and create the secret.
 	key := make([]byte, HMACKeyLen)
 	if _, err := rand.Read(key); err != nil {
 		return nil, fmt.Errorf("generate HMAC key: %w", err)

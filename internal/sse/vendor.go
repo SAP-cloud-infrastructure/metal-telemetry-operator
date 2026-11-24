@@ -54,9 +54,12 @@ func (vc VendorConfig) SSEURL() string {
 	}
 }
 
-// insecureHTTPClient returns an HTTP client that skips TLS verification.
-// BMCs in the internal management network use self-signed certificates.
-func insecureHTTPClient() *http.Client {
+// buildHTTPClient returns an HTTP client. When insecure is true, TLS
+// verification is skipped (required for BMCs with self-signed certificates).
+func buildHTTPClient(insecure bool) *http.Client {
+	if !insecure {
+		return &http.Client{}
+	}
 	return &http.Client{
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec
@@ -82,8 +85,8 @@ type eventServiceResponse struct {
 
 // ProbeEventService fetches /redfish/v1/EventService from the given BMC host
 // and returns the vendor configuration for SSE collection.
-func ProbeEventService(ctx context.Context, host, username, password string) (VendorConfig, error) {
-	client := insecureHTTPClient()
+func ProbeEventService(ctx context.Context, host, username, password string, insecureTLS bool) (VendorConfig, error) {
+	client := buildHTTPClient(insecureTLS)
 	url := fmt.Sprintf("https://%s/redfish/v1/EventService", host)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)

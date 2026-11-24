@@ -260,7 +260,7 @@ func (s *EventSink) recordEventLocked(bmcName string, ev sink.Event, keys map[al
 	key := alertLabelKey{
 		severity:  CanonicalSeverity(ev.Severity),
 		messageID: ev.MessageID,
-		component: componentFromOrigin(ev.OriginOfCondition),
+		component: sink.ComponentFromOrigin(ev.OriginOfCondition),
 	}
 	if _, exists := keys[key]; !exists && len(keys) >= s.maxSeriesPerBMC {
 		s.log.V(1).Info("Dropping event: per-BMC series limit reached",
@@ -314,17 +314,4 @@ func CanonicalSeverity(s string) string {
 		return "Info"
 	}
 	return s
-}
-
-// componentFromOrigin returns the trailing path segment of a Redfish
-// OriginOfCondition URI. Empty input yields "system".
-func componentFromOrigin(origin string) string {
-	origin = strings.TrimRight(origin, "/")
-	if origin == "" {
-		return "system"
-	}
-	if i := strings.LastIndex(origin, "/"); i >= 0 {
-		return origin[i+1:]
-	}
-	return origin
 }

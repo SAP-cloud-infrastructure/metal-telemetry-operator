@@ -26,11 +26,12 @@ const (
 
 // ConnConfig holds the parameters needed to open and maintain one SSE connection.
 type ConnConfig struct {
-	BMCName  string
-	Host     string
-	Username string
-	Password string
-	Vendor   VendorConfig
+	BMCName     string
+	Host        string
+	Username    string
+	Password    string
+	Vendor      VendorConfig
+	InsecureTLS bool
 }
 
 // StatusWriter updates BMCTelemetry status from the SSE goroutine.
@@ -110,7 +111,7 @@ func (c *sseConn) stream(ctx context.Context) error {
 	req.SetBasicAuth(c.cfg.Username, c.cfg.Password)
 	req.Header.Set("Accept", "text/event-stream")
 
-	client := insecureHTTPClient()
+	client := buildHTTPClient(c.cfg.InsecureTLS)
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)

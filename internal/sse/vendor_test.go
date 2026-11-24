@@ -50,7 +50,7 @@ func TestProbeEventService_hpeILO_MetricReport(t *testing.T) {
 	})
 	defer shutdown()
 
-	cfg, err := sse.ProbeEventService(context.Background(), host, "admin", "pass")
+	cfg, err := sse.ProbeEventService(context.Background(), host, "admin", "pass", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -72,7 +72,7 @@ func TestProbeEventService_noSSEURI_serviceDisabled(t *testing.T) {
 	})
 	defer shutdown()
 
-	cfg, err := sse.ProbeEventService(context.Background(), host, "admin", "pass")
+	cfg, err := sse.ProbeEventService(context.Background(), host, "admin", "pass", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -93,7 +93,7 @@ func TestProbeEventService_vendorSpecificPathWithFilter(t *testing.T) {
 	})
 	defer shutdown()
 
-	cfg, err := sse.ProbeEventService(context.Background(), host, "admin", "pass")
+	cfg, err := sse.ProbeEventService(context.Background(), host, "admin", "pass", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -120,7 +120,7 @@ func TestProbeEventService_standardSSEPath(t *testing.T) {
 	})
 	defer shutdown()
 
-	cfg, err := sse.ProbeEventService(context.Background(), host, "admin", "pass")
+	cfg, err := sse.ProbeEventService(context.Background(), host, "admin", "pass", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestProbeEventService_dellIDRAC10(t *testing.T) {
 	})
 	defer shutdown()
 
-	cfg, err := sse.ProbeEventService(context.Background(), host, "admin", "pass")
+	cfg, err := sse.ProbeEventService(context.Background(), host, "admin", "pass", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -158,7 +158,7 @@ func TestProbeEventService_dellIDRAC9(t *testing.T) {
 	})
 	defer shutdown()
 
-	cfg, err := sse.ProbeEventService(context.Background(), host, "admin", "pass")
+	cfg, err := sse.ProbeEventService(context.Background(), host, "admin", "pass", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -179,7 +179,7 @@ func TestProbeEventService_serviceDisabled_subscriptionsPresent(t *testing.T) {
 	})
 	defer shutdown()
 
-	cfg, err := sse.ProbeEventService(context.Background(), host, "admin", "pass")
+	cfg, err := sse.ProbeEventService(context.Background(), host, "admin", "pass", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestProbeEventService_eventFormatTypes_MetricReport(t *testing.T) {
 	})
 	defer shutdown()
 
-	cfg, err := sse.ProbeEventService(context.Background(), host, "admin", "pass")
+	cfg, err := sse.ProbeEventService(context.Background(), host, "admin", "pass", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -217,7 +217,7 @@ func TestProbeEventService_noSignals_unsupported(t *testing.T) {
 	})
 	defer shutdown()
 
-	cfg, err := sse.ProbeEventService(context.Background(), host, "admin", "pass")
+	cfg, err := sse.ProbeEventService(context.Background(), host, "admin", "pass", true)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

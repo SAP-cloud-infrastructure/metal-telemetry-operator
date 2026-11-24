@@ -10,17 +10,13 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/criticalevent"
 	"github.com/SAP-cloud-infrastructure/metal-telemetry-operator/internal/sink"
 	"github.com/go-logr/logr"
 	metalv1alpha1 "github.com/ironcore-dev/metal-operator/api/v1alpha1"
 	corev1 "k8s.io/api/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/recorder"
-)
-
-const (
-	// BMCRefField is the field-indexer key for Server lookup.
-	BMCRefField = "spec.bmcRef.name"
 )
 
 // Handler emits a Kubernetes Event for every Warning-severity Redfish alert
@@ -41,8 +37,8 @@ func (h *Handler) HandleWarning(ctx context.Context, bmcName string, event sink.
 	}
 
 	serverList := &metalv1alpha1.ServerList{}
-	if err := h.Client.List(ctx, serverList, client.MatchingFields{BMCRefField: bmcName}); err != nil {
-		return fmt.Errorf("list Servers by %s=%s: %w", BMCRefField, bmcName, err)
+	if err := h.Client.List(ctx, serverList, client.MatchingFields{criticalevent.BMCRefField: bmcName}); err != nil {
+		return fmt.Errorf("list Servers by %s=%s: %w", criticalevent.BMCRefField, bmcName, err)
 	}
 
 	if len(serverList.Items) == 0 {

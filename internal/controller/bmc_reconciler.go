@@ -46,6 +46,7 @@ type BMCReconciler struct {
 	client.Client
 	Scheme                *runtime.Scheme
 	MaxConcurrentConnects int
+	InsecureTLS           bool
 	// ConfigLoader provides live-reloaded push pipeline configuration (exclusion
 	// rules and mode overrides). Optional; when nil the push config path is skipped.
 	ConfigLoader *push.ConfigLoader
@@ -148,7 +149,7 @@ func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 	}
 
 	// Probe the EventService to detect vendor SSE support.
-	vendorCfg, err := sse.ProbeEventService(ctx, host, username, password)
+	vendorCfg, err := sse.ProbeEventService(ctx, host, username, password, r.InsecureTLS)
 	if err != nil {
 		log.Error(err, "EventService probe failed")
 		if err2 := r.setSchemaDetectedCondition(ctx, tel, false, err.Error()); err2 != nil {
@@ -185,11 +186,12 @@ func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 	// Start or update the SSE connection.
 	connCfg := sse.ConnConfig{
-		BMCName:  bmc.Name,
-		Host:     host,
-		Username: username,
-		Password: password,
-		Vendor:   vendorCfg,
+		BMCName:     bmc.Name,
+		Host:        host,
+		Username:    username,
+		Password:    password,
+		Vendor:      vendorCfg,
+		InsecureTLS: r.InsecureTLS,
 	}
 	if err := r.connMgr.Ensure(ctx, connCfg); err != nil {
 		log.Error(err, "Failed to ensure SSE connection")
@@ -251,9 +253,7 @@ func (r *BMCReconciler) ensureTelemetry(ctx context.Context, bmc *metalv1alpha1.
 	}
 
 	tel = &telemetryv1alpha1.BMCTelemetry{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: bmc.Name,
-		},
+		ObjectMeta: metav1.ObjectMeta{Name: bmc.Name},
 	}
 	if err := ctrl.SetControllerReference(bmc, tel, r.Scheme); err != nil {
 		return nil, fmt.Errorf("set owner reference: %w", err)

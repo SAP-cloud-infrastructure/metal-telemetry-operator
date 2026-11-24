@@ -283,7 +283,7 @@ $(GOLANGCI_LINT): $(LOCALBIN)
 	$(call go-install-tool,$(GOLANGCI_LINT),github.com/golangci/golangci-lint/v2/cmd/golangci-lint,$(GOLANGCI_LINT_VERSION))
 	@test -f .custom-gcl.yml && { \
 		echo "Building custom golangci-lint with plugins..." && \
-		$(GOLANGCI_LINT) custom --destination $(LOCALBIN) --name golangci-lint-custom && \
+		GOTOOLCHAIN=local $(GOLANGCI_LINT) custom --destination $(LOCALBIN) --name golangci-lint-custom && \
 		mv -f $(LOCALBIN)/golangci-lint-custom $(GOLANGCI_LINT); \
 	} || true
 
@@ -297,7 +297,7 @@ set -e; \
 package=$(2)@$(3) ;\
 echo "Downloading $${package}" ;\
 rm -f "$(1)" ;\
-GOBIN="$(LOCALBIN)" go install $${package} ;\
+GOBIN="$(LOCALBIN)" GOTOOLCHAIN=local go install $${package} ;\
 mv "$(LOCALBIN)/$$(basename "$(1)")" "$(1)-$(3)" ;\
 } ;\
 ln -sf "$$(realpath "$(1)-$(3)")" "$(1)"
@@ -326,21 +326,6 @@ install-helm: ## Install the latest version of Helm.
 		echo "Installing Helm..." && \
 		curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-4 | bash; \
 	}
-
-.PHONY: helm-deploy
-helm-deploy: install-helm ## Deploy manager to the K8s cluster via Helm. Specify an image with IMG.
-	IMG="$(IMG)"; $(HELM) upgrade --install $(HELM_RELEASE) $(HELM_CHART_DIR) \
-		--namespace $(HELM_NAMESPACE) \
-		--create-namespace \
-		--set manager.image.repository=$${IMG%:*} \
-		--set manager.image.tag=$${IMG##*:} \
-		--wait \
-		--timeout 5m \
-		$(HELM_EXTRA_ARGS)
-
-.PHONY: helm-uninstall
-helm-uninstall: ## Uninstall the Helm release from the K8s cluster.
-	$(HELM) uninstall $(HELM_RELEASE) --namespace $(HELM_NAMESPACE)
 
 .PHONY: helm-status
 helm-status: ## Show Helm release status.

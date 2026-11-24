@@ -55,7 +55,7 @@ func (c *Client) Send(ctx context.Context, bmcName string, event sink.Event) {
 			"alertname":  "RedfishCriticalAlert",
 			"hostname":   bmcName,
 			"message_id": event.MessageID,
-			"component":  componentFromOrigin(event.OriginOfCondition),
+			"component":  sink.ComponentFromOrigin(event.OriginOfCondition),
 			"severity":   "critical",
 		},
 		Annotations: map[string]string{
@@ -92,15 +92,4 @@ func (c *Client) Send(ctx context.Context, bmcName string, event sink.Event) {
 		c.Log.Error(fmt.Errorf("status %d", resp.StatusCode),
 			"Alertmanager returned non-2xx response", "bmc", bmcName)
 	}
-}
-
-func componentFromOrigin(origin string) string {
-	origin = strings.TrimRight(origin, "/")
-	if origin == "" {
-		return "system"
-	}
-	if i := strings.LastIndex(origin, "/"); i >= 0 {
-		return origin[i+1:]
-	}
-	return origin
 }
