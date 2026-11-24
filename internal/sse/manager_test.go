@@ -46,9 +46,10 @@ func TestConnectionManager_StopBMC_stopsBothStreams(t *testing.T) {
 	mgr := sse.NewConnectionManager(10, nil, nil, nil, nil, nil, nil, logr.Discard())
 
 	baseCfg := sse.ConnConfig{
-		Host:     host,
-		Username: testUsername,
-		Password: testPassword,
+		Host:        host,
+		Username:    testUsername,
+		Password:    testPassword,
+		InsecureTLS: true,
 		Vendor: sse.VendorConfig{
 			Mode:   sse.ModeSSE,
 			SSEURI: testStandardSSEURI,
@@ -103,22 +104,24 @@ func TestConnectionManager_StreamKinds_UseDistinctURLs(t *testing.T) {
 	}
 
 	if err := mgr.Ensure(context.Background(), sse.ConnConfig{
-		BMCName:    "bmc-urltest",
-		Host:       host,
-		Username:   testUsername,
-		Password:   testPassword,
-		Vendor:     vendor,
-		StreamKind: telemetryv1alpha1.StreamKindMetrics,
+		BMCName:     "bmc-urltest",
+		Host:        host,
+		Username:    testUsername,
+		Password:    testPassword,
+		InsecureTLS: true,
+		Vendor:      vendor,
+		StreamKind:  telemetryv1alpha1.StreamKindMetrics,
 	}); err != nil {
 		t.Fatalf("Ensure metrics: %v", err)
 	}
 	if err := mgr.Ensure(context.Background(), sse.ConnConfig{
-		BMCName:    "bmc-urltest",
-		Host:       host,
-		Username:   testUsername,
-		Password:   testPassword,
-		Vendor:     vendor,
-		StreamKind: telemetryv1alpha1.StreamKindAlerts,
+		BMCName:     "bmc-urltest",
+		Host:        host,
+		Username:    testUsername,
+		Password:    testPassword,
+		InsecureTLS: true,
+		Vendor:      vendor,
+		StreamKind:  telemetryv1alpha1.StreamKindAlerts,
 	}); err != nil {
 		t.Fatalf("Ensure alerts: %v", err)
 	}
@@ -165,12 +168,13 @@ func TestConnectionManager_StopBMC_leavesOtherBMC(t *testing.T) {
 
 	makeCfg := func(bmc string, kind telemetryv1alpha1.StreamKind) sse.ConnConfig {
 		return sse.ConnConfig{
-			BMCName:    bmc,
-			Host:       host,
-			Username:   testUsername,
-			Password:   testPassword,
-			Vendor:     sse.VendorConfig{Mode: sse.ModeSSE, SSEURI: testStandardSSEURI},
-			StreamKind: kind,
+			BMCName:     bmc,
+			Host:        host,
+			Username:    testUsername,
+			Password:    testPassword,
+			InsecureTLS: true,
+			Vendor:      sse.VendorConfig{Mode: sse.ModeSSE, SSEURI: testStandardSSEURI},
+			StreamKind:  kind,
 		}
 	}
 

@@ -104,12 +104,13 @@ func TestConn_AlertEventRouting(t *testing.T) {
 	mgr := sse.NewConnectionManager(10, nil, nil, nil, es, tf, nil, logr.Discard())
 
 	cfg := sse.ConnConfig{
-		BMCName:    "bmc-alerttest",
-		Host:       host,
-		Username:   testUsername,
-		Password:   testPassword,
-		Vendor:     sse.VendorConfig{Mode: sse.ModeSSE, SSEURI: testStandardSSEURI},
-		StreamKind: telemetryv1alpha1.StreamKindAlerts,
+		BMCName:     "bmc-alerttest",
+		Host:        host,
+		Username:    testUsername,
+		Password:    testPassword,
+		Vendor:      sse.VendorConfig{Mode: sse.ModeSSE, SSEURI: testStandardSSEURI},
+		InsecureTLS: true,
+		StreamKind:  telemetryv1alpha1.StreamKindAlerts,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -162,12 +163,13 @@ func TestConn_AlertEventRouting_NilTestFilter(t *testing.T) {
 	mgr := sse.NewConnectionManager(10, nil, nil, nil, es, nil, nil, logr.Discard())
 
 	cfg := sse.ConnConfig{
-		BMCName:    "bmc-notestfilter",
-		Host:       host,
-		Username:   testUsername,
-		Password:   testPassword,
-		Vendor:     sse.VendorConfig{Mode: sse.ModeSSE, SSEURI: testStandardSSEURI},
-		StreamKind: telemetryv1alpha1.StreamKindAlerts,
+		BMCName:     "bmc-notestfilter",
+		Host:        host,
+		Username:    testUsername,
+		Password:    testPassword,
+		Vendor:      sse.VendorConfig{Mode: sse.ModeSSE, SSEURI: testStandardSSEURI},
+		InsecureTLS: true,
+		StreamKind:  telemetryv1alpha1.StreamKindAlerts,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -203,12 +205,13 @@ func TestConn_AlertEventRouting_RecordTestResult(t *testing.T) {
 	mgr := sse.NewConnectionManager(10, nil, nil, nil, es, tf, tr, logr.Discard())
 
 	cfg := sse.ConnConfig{
-		BMCName:    "bmc-testrecorder",
-		Host:       host,
-		Username:   testUsername,
-		Password:   testPassword,
-		Vendor:     sse.VendorConfig{Mode: sse.ModeSSE, SSEURI: testStandardSSEURI},
-		StreamKind: telemetryv1alpha1.StreamKindAlerts,
+		BMCName:     "bmc-testrecorder",
+		Host:        host,
+		Username:    testUsername,
+		Password:    testPassword,
+		Vendor:      sse.VendorConfig{Mode: sse.ModeSSE, SSEURI: testStandardSSEURI},
+		InsecureTLS: true,
+		StreamKind:  telemetryv1alpha1.StreamKindAlerts,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
