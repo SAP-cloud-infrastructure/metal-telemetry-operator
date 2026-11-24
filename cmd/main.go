@@ -57,6 +57,7 @@ func main() {
 	var bmcConfigName string
 	var bmcConfigNamespace string
 	var pushSharedSecretName string
+	var pushInsecureTLS bool
 	tlsOpts := make([]func(*tls.Config), 0, 1)
 
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metrics endpoint binds to.")
@@ -85,6 +86,9 @@ func main() {
 			"on first start if it does not exist. When set, BMCs must include "+
 			"\"Authorization: Bearer <hex(key)>\" in every event POST. "+
 			"When empty, the receiver accepts unauthenticated POSTs.")
+	flag.BoolVar(&pushInsecureTLS, "push-insecure-tls", false,
+		"Disable TLS certificate verification for SSE and EventService probe connections to BMCs. "+
+			"Use only in test environments with self-signed certificates.")
 
 	// Disable HTTP/2 to avoid stream cancellation CVEs.
 	disableHTTP2 := func(c *tls.Config) {
@@ -158,6 +162,7 @@ func main() {
 		Client:                mgr.GetClient(),
 		Scheme:                mgr.GetScheme(),
 		MaxConcurrentConnects: maxConcurrentConnects,
+		InsecureTLS:           pushInsecureTLS,
 		ConfigLoader:          pushLoader,
 		Sink:                  sharedSink,
 	}

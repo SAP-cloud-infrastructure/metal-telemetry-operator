@@ -5,6 +5,8 @@ package push
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
@@ -118,7 +120,9 @@ func NewReceiver(cfg ReceiverConfig) (*Receiver, error) {
 		metricsPath: metricsPathFor(cfg.SubscriberID),
 	}
 	if len(cfg.SharedSecret) > 0 {
-		r.bearerToken = hex.EncodeToString(cfg.SharedSecret)
+		mac := hmac.New(sha256.New, cfg.SharedSecret)
+		mac.Write([]byte("bearer-token"))
+		r.bearerToken = hex.EncodeToString(mac.Sum(nil))
 	}
 	r.buildMux()
 	r.srv = &http.Server{

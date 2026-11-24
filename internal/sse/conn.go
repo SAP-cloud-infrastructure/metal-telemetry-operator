@@ -45,12 +45,13 @@ func streamTypeLabel(k telemetryv1alpha1.StreamKind) string {
 
 // ConnConfig holds the parameters needed to open and maintain one SSE connection.
 type ConnConfig struct {
-	BMCName    string
-	Host       string
-	Username   string
-	Password   string
-	Vendor     VendorConfig
-	StreamKind telemetryv1alpha1.StreamKind
+	BMCName     string
+	Host        string
+	Username    string
+	Password    string
+	Vendor      VendorConfig
+	InsecureTLS bool
+	StreamKind  telemetryv1alpha1.StreamKind
 	// EventSink receives decoded Redfish alert events from the alerts SSE stream.
 	// If nil, alert events are silently discarded.
 	EventSink sink.EventSink
@@ -155,7 +156,7 @@ func (c *sseConn) stream(ctx context.Context) error {
 	req.SetBasicAuth(c.cfg.Username, c.cfg.Password)
 	req.Header.Set("Accept", "text/event-stream")
 
-	client := insecureHTTPClient()
+	client := buildHTTPClient(c.cfg.InsecureTLS)
 	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("connect: %w", err)

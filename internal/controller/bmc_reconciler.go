@@ -51,6 +51,7 @@ type BMCReconciler struct {
 	client.Client
 	Scheme                *runtime.Scheme
 	MaxConcurrentConnects int
+	InsecureTLS           bool
 	// ConfigLoader provides live-reloaded push pipeline configuration (exclusion
 	// rules and mode overrides). Optional; when nil the push config path is skipped.
 	ConfigLoader *push.ConfigLoader
@@ -282,11 +283,12 @@ func (r *BMCReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.R
 
 	// Start or update the SSE connections — one for metrics (MetricReport filter), one for alerts (Event filter).
 	baseCfg := sse.ConnConfig{
-		BMCName:  bmc.Name,
-		Host:     host,
-		Username: username,
-		Password: password,
-		Vendor:   vendorCfg,
+		BMCName:     bmc.Name,
+		Host:        host,
+		Username:    username,
+		Password:    password,
+		Vendor:      vendorCfg,
+		InsecureTLS: r.InsecureTLS,
 	}
 	metricsCfg := baseCfg
 	metricsCfg.StreamKind = telemetryv1alpha1.StreamKindMetrics
@@ -385,7 +387,7 @@ func (r *BMCReconciler) probeEventServiceForBMC(
 		return "", "", "", sse.VendorConfig{}, 30 * time.Second
 	}
 
-	vendorCfg, err = sse.ProbeEventService(ctx, host, username, password)
+	vendorCfg, err = sse.ProbeEventService(ctx, host, username, password, r.InsecureTLS)
 	if err != nil {
 		log.Error(err, "EventService probe failed")
 		var count int
