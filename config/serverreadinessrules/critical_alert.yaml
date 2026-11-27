@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: SAP SE or an SAP affiliate company and IronCore contributors
+# SPDX-License-Identifier: Apache-2.0
+#
+# Apply this rule to automatically taint any Server with an active CriticalEventReceived
+# condition, preventing new ServerClaims from binding to it.
+#
+# If the BMC's OK event is missed (operator was down or network dropped), the condition
+# stays True and the taint persists. Manual runbook to clear:
+#
+#   kubectl patch server <name> --type=merge --subresource=status \
+#     -p '{"status":{"conditions":[{"type":"CriticalEventReceived","status":"False",
+#          "reason":"ManualClear","message":"Manually cleared by operator"}]}}'
+#
+# The ServerReadinessRule controller removes the taint on the next reconcile.
+
+apiVersion: metal.ironcore.dev/v1alpha1
+kind: ServerReadinessRule
+metadata:
+  name: critical-hardware-alert
+spec:
+  enforcementMode: Continuous
+  conditions:
+    - type: CriticalEventReceived
+      requiredStatus: "True"
+  taint:
+    key: hardware.metal.ironcore.dev/critical-alert
+    effect: NoBind
+  serverSelector: {}
